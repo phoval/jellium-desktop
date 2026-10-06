@@ -10,7 +10,7 @@ on:
       - 'v*'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -25,12 +25,6 @@ jobs:
             msystem: CLANG64
             pkg_prefix: mingw-w64-clang-x86_64
             triple: x86_64-pc-windows-msvc
-          - arch: arm64
-            runner: windows-11-arm
-            platform: windowsarm64
-            msystem: CLANGARM64
-            pkg_prefix: mingw-w64-clang-aarch64
-            triple: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
 
     steps:
