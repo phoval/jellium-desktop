@@ -51,9 +51,10 @@ impl Connect {
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         let body: Element<'a, Message, Theme, iced_wgpu::Renderer> = match screen {
             Screen::Failed => self.failure_view(),
-            Screen::Working { .. } | Screen::Retiring { .. } => self.spinner_view(screen),
+            Screen::Working { .. } => self.spinner_view(),
             Screen::Form { url } => self.form_view(url),
-            Screen::Gone => iced_widget::space::horizontal().into(),
+            // The web frame is visible during retirement; keep only the fading backdrop.
+            Screen::Retiring { .. } | Screen::Gone => iced_widget::space::horizontal().into(),
         };
         container(body)
             .width(Length::Fill)
@@ -87,18 +88,12 @@ impl Connect {
         .into()
     }
 
-    fn spinner_view(&self, screen: &Screen) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
-        let o = opacity(screen);
+    fn spinner_view(&self) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
         column![
             image(crate::shell::logo::handle())
-                .width(Length::Fixed(crate::shell::logo::CONNECT_WIDTH))
-                .opacity(o),
-            crate::shell::spinner::Spinner::new(
-                fade(theme::ACCENT, o),
-                fade(theme::FIELD, o),
-                self.spinner_started,
-            )
-            .view(),
+                .width(Length::Fixed(crate::shell::logo::CONNECT_WIDTH)),
+            crate::shell::spinner::Spinner::new(theme::ACCENT, theme::FIELD, self.spinner_started)
+                .view(),
         ]
         .spacing(32)
         .align_x(Alignment::Center)
@@ -127,7 +122,7 @@ impl Connect {
         }
     }
 
-    /// The spinner's next frame, when a refresh interval is available.
+    /// The spinner or backdrop fade's next frame, when a refresh interval is available.
     pub fn deadline(&self, screen: &Screen) -> Deadline {
         let spinning = matches!(screen, Screen::Working { .. } | Screen::Retiring { .. });
         match (spinning, jfn_gpu_paint::refresh_interval()) {
@@ -150,12 +145,5 @@ fn opacity(screen: &Screen) -> f32 {
             1.0 - (fade_from.elapsed().as_secs_f32() / FADE.as_secs_f32()).clamp(0.0, 1.0)
         }
         _ => 1.0,
-    }
-}
-
-fn fade(color: Color, opacity: f32) -> Color {
-    Color {
-        a: color.a * opacity,
-        ..color
     }
 }
