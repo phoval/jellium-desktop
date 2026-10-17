@@ -513,6 +513,8 @@ struct Updated {
 struct Loop {
     actions: crate::shell::ApplicationActions,
     surface: SurfaceHandle,
+    target: jfn_gpu_paint::WindowTarget,
+    wake: Arc<dyn Fn() + Send + Sync>,
     wake_tx: Sender<Work>,
     painter: Painter,
     model: Model,
@@ -619,6 +621,8 @@ impl Loop {
         Ok(Loop {
             actions,
             surface,
+            target,
+            wake,
             wake_tx: wake_tx.clone(),
             painter,
             model,
@@ -851,6 +855,7 @@ impl Loop {
                 .any(|event| ignored_key(model, event).is_some())
             && !updated.outdated;
 
+        let mut lost_surface = None;
         if settled {
             if this.drew_nothing_yet {
                 this.drew_nothing_yet = false;
@@ -873,6 +878,9 @@ impl Loop {
                 Painted::Deferred(retry_at) => {
                     this.pending = this.pending.merge(Deadline::at(retry_at));
                 }
+                Painted::Lost(loss) => {
+                    lost_surface = Some(loss);
+                }
             }
         }
         this.cache = ui.into_cache();
@@ -880,6 +888,11 @@ impl Loop {
             && let Some(overlay) = this.model.stack.settings_overlay_mut()
         {
             overlay.retain_settings_state(focus, offset);
+        }
+        if let Some(loss) = lost_surface {
+            this.recover_painter(loss);
+            publish(&this.model, this.current);
+            return;
         }
         if settled {
             publish(&this.model, this.current);
@@ -897,6 +910,54 @@ impl Loop {
         this.immediate = true;
         publish(&this.model, this.current);
         apply_visibility(this.surface, &this.model);
+    }
+
+    fn recover_painter(&mut self, loss: jfn_gpu_paint::SurfaceLost) {
+        if !loss.is_device_lost() {
+            tracing::error!(
+                "shell [overlay-d3d12]: shell swapchain permanently lost ({loss}); initiating restart-required shutdown"
+            );
+            jfn_playback::shutdown::jfn_shutdown_initiate();
+            return;
+        }
+        let Some(gpu) = jfn_gpu_paint::surfaces() else {
+            tracing::error!(
+                "shell [overlay-d3d12]: GPU device unavailable after loss ({loss}); initiating restart-required shutdown"
+            );
+            jfn_playback::shutdown::jfn_shutdown_initiate();
+            return;
+        };
+        let failed_generation = self.painter.device_generation();
+        match gpu.recover_generation(failed_generation, &loss.to_string()) {
+            jfn_gpu_paint::DeviceRecoveryOutcome::Recovered { generation, .. } => {
+                let target = jfn_platform_abi::try_lease()
+                    .and_then(|lease| lease.platform().surface_window_target(self.surface))
+                    .unwrap_or(self.target);
+                self.target = target;
+                match Painter::new(gpu, target, self.current, Arc::clone(&self.wake)) {
+                    Ok(new_painter) => {
+                        self.painter = new_painter;
+                        self.discard_cache();
+                        self.immediate = true;
+                        tracing::info!(
+                            "shell [overlay-d3d12]: rebuilt shell painter on recovered GPU device generation {generation}"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "shell [overlay-d3d12]: failed to rebuild shell painter on recovered GPU generation {generation} ({err}); initiating restart-required shutdown"
+                        );
+                        jfn_playback::shutdown::jfn_shutdown_initiate();
+                    }
+                }
+            }
+            jfn_gpu_paint::DeviceRecoveryOutcome::RestartRequired { generation, reason } => {
+                tracing::error!(
+                    "shell [overlay-d3d12]: GPU device recovery at generation {generation} requires application restart: {reason}"
+                );
+                jfn_playback::shutdown::jfn_shutdown_initiate();
+            }
+        }
     }
 }
 
@@ -1046,6 +1107,8 @@ enum Painted {
     /// The swapchain had no frame and the display reports no refresh interval;
     /// the wake was requested from the overlay's own frame source.
     Requested,
+    /// The swapchain or underlying GPU device was lost and requires recovery.
+    Lost(jfn_gpu_paint::SurfaceLost),
 }
 
 /// The shell overlay's own producer: a deferred acquire with no retry deadline
@@ -1083,6 +1146,7 @@ fn paint(
                     Painted::Requested
                 }
             },
+            Acquired::Lost(loss) => Painted::Lost(loss),
             Acquired::Frame(frame) => {
                 ui.draw(
                     painter.renderer(),

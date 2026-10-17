@@ -43,9 +43,9 @@ impl Painter {
     ) -> Result<Painter, SurfaceLost> {
         let swapchain = gpu.new_swapchain(target, frame_size(extent))?;
         let engine = Engine::new(
-            gpu.adapter(),
-            gpu.device().clone(),
-            gpu.queue().clone(),
+            swapchain.adapter(),
+            swapchain.device().clone(),
+            swapchain.queue().clone(),
             jfn_gpu_paint::FORMAT,
             Some(Antialiasing::MSAAx4),
             Shell::new(Waker(wake)),
@@ -63,6 +63,10 @@ impl Painter {
             renderer,
             viewport: viewport(extent),
         })
+    }
+
+    pub fn device_generation(&self) -> u64 {
+        self.swapchain.device_generation()
     }
 
     pub fn resize(&mut self, extent: WindowExtent) {

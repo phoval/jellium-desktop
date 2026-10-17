@@ -21,12 +21,12 @@ pub(crate) enum Kind {
     NoAdapter,
     #[error("device request failed: {0}")]
     DeviceRequest(#[from] wgpu::RequestDeviceError),
+    #[error("GPU device lost: {0}")]
+    DeviceLost(String),
     #[error("surface creation failed: {0}")]
     SurfaceCreate(#[from] wgpu::CreateSurfaceError),
     #[error("adapter does not support requested surface")]
     SurfaceUnsupported,
-    #[error("swapchain acquire failed: {0}")]
-    Acquire(&'static str),
     #[error("invalid frame dimensions: {}x{}", .0.w, .0.h)]
     BadDimensions(FrameSize),
     #[error(
@@ -38,6 +38,18 @@ pub(crate) enum Kind {
         stride: u32,
         len: usize,
     },
+}
+
+impl SurfaceLost {
+    pub(crate) fn device_lost(reason: impl Into<String>) -> Self {
+        Self(Kind::DeviceLost(reason.into()))
+    }
+
+    /// Whether this surface loss was caused by the underlying GPU device being
+    /// lost or invalidated rather than a per-surface or per-frame parameter error.
+    pub const fn is_device_lost(&self) -> bool {
+        matches!(self.0, Kind::DeviceLost(_))
+    }
 }
 
 impl<E: Into<Kind>> From<E> for SurfaceLost {

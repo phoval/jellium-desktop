@@ -46,22 +46,33 @@ impl Devices {
     /// Publishes every tree change since the last call, including the
     /// `SetContent` wgpu issues from inside `configure`.
     ///
-    /// A failed commit is loud even though it cannot be handled here: it
-    /// usually means the composition device was lost, after which no tree
-    /// change ever reaches the screen again.
-    pub(crate) fn commit(&self) {
+    /// Returns `false` when the composition commit fails (typically because the
+    /// DirectComposition device was lost and needs recreation).
+    pub(crate) fn commit(&self) -> bool {
         if let Err(e) = unsafe { self.device.Commit() } {
-            tracing::error!(target: "platform", "DirectComposition Commit failed: {e:?}");
+            tracing::error!(
+                target: "platform",
+                "[overlay-d3d12] DirectComposition Commit failed: {e:?}"
+            );
+            return false;
         }
+        true
     }
 
     /// Commits and blocks until the composition engine has processed it, so
     /// the change is on screen before the caller returns.
-    pub(crate) fn commit_and_wait(&self) {
-        self.commit();
-        if let Err(e) = unsafe { self.device.WaitForCommitCompletion() } {
-            tracing::error!(target: "platform", "DirectComposition WaitForCommitCompletion failed: {e:?}");
+    pub(crate) fn commit_and_wait(&self) -> bool {
+        if !self.commit() {
+            return false;
         }
+        if let Err(e) = unsafe { self.device.WaitForCommitCompletion() } {
+            tracing::error!(
+                target: "platform",
+                "[overlay-d3d12] DirectComposition WaitForCommitCompletion failed: {e:?}"
+            );
+            return false;
+        }
+        true
     }
 }
 

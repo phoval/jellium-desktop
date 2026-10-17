@@ -19,20 +19,48 @@ mod backend;
 mod backend;
 
 pub use backend::ProducerId;
-#[cfg(windows)]
-pub(crate) use backend::adapter_luid;
 pub(crate) use backend::{Importer, acquire_barrier, adapter_matches, open_device};
 #[cfg(windows)]
-pub use backend::{format_luid_switch, unpack_luid};
+pub(crate) use backend::{adapter_luid, poll_device_removed_reason};
+#[cfg(windows)]
+pub use backend::{format_luid_switch, is_device_removed_hresult, unpack_luid};
+
+#[cfg(not(windows))]
+pub(crate) fn poll_device_removed_reason(_device: &wgpu::Device) -> Option<String> {
+    None
+}
 
 /// A shared-texture import that did not work.
 ///
-/// Deliberately not a [`crate::SurfaceLost`]: a shared frame has no CPU pixels,
-/// so there is nothing to fall back to. The frame is logged and dropped and the
-/// surface stays usable, which is why this never reaches a caller.
+/// A per-frame import failure (`device_lost: None`) is not a [`crate::SurfaceLost`]:
+/// a shared frame has no CPU pixels, so there is nothing to fall back to. When
+/// the underlying D3D12 device itself has entered the removed state
+/// (`device_lost: Some(_)`), the caller escalates to [`crate::SurfaceLost`] so
+/// coordinated device-loss recovery runs instead of silently dropping frames.
 #[derive(Debug, thiserror::Error)]
-#[error("shared-texture import failed: {0}")]
-pub(crate) struct ImportFailed(pub(crate) &'static str);
+#[error("shared-texture import failed: {reason}")]
+pub(crate) struct ImportFailed {
+    pub(crate) reason: &'static str,
+    pub(crate) device_lost: Option<String>,
+}
+
+impl ImportFailed {
+    #[cfg(windows)]
+    pub(crate) fn device_lost(reason: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            device_lost: Some(detail.into()),
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+pub(crate) const fn ImportFailed(reason: &'static str) -> ImportFailed {
+    ImportFailed {
+        reason,
+        device_lost: None,
+    }
+}
 
 /// One imported frame, ready to sample.
 pub(crate) struct Imported {

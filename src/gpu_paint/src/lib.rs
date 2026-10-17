@@ -31,7 +31,10 @@ mod shared_texture;
 mod swapchain;
 mod types;
 
-pub use context::{AdapterDiagnostics, FORMAT, ProducerMatch, Surfaces, any_adapter, surfaces};
+pub use context::{
+    AdapterDiagnostics, DeviceLifecycleState, DeviceRecoveryCoordinator, DeviceRecoveryOutcome,
+    FORMAT, ProducerMatch, Surfaces, any_adapter, surfaces,
+};
 pub use error::SurfaceLost;
 pub use painter::{PresentFailed, Surface};
 pub use refresh::{
@@ -39,7 +42,7 @@ pub use refresh::{
 };
 pub use shared::ProducerId;
 #[cfg(windows)]
-pub use shared::{format_luid_switch, unpack_luid};
+pub use shared::{format_luid_switch, is_device_removed_hresult, unpack_luid};
 #[cfg(target_os = "linux")]
 pub use shared_texture::{DmabufFormat, DmabufPlane};
 pub use shared_texture::{FrameSize, SharedTexture};

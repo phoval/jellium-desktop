@@ -10,6 +10,7 @@ use crate::FrameSize;
 /// The variant also fixes the size policy — see [`crate::painter::SizePolicy`]
 /// — because whether the swapchain *is* the window is a property of the target,
 /// not a caller preference.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WindowTarget {
     /// X11 (xcb) — `connection` is an `xcb_connection_t*`, `window` is the XID.
     /// `visual` is the ARGB visual ID. `screen` is the screen index.

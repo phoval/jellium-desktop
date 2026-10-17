@@ -47,6 +47,31 @@ pub fn format_luid_switch(luid: ProducerId) -> String {
     format!("{high},{low}")
 }
 
+/// Returns `true` when `hr` is a DXGI/D3D12 device-removal status code rather
+/// than a per-resource or per-handle rejection.
+pub const fn is_device_removed_hresult(hr: windows::core::HRESULT) -> bool {
+    matches!(
+        hr.0 as u32,
+        0x887A_0005 // DXGI_ERROR_DEVICE_REMOVED
+        | 0x887A_0006 // DXGI_ERROR_DEVICE_HUNG
+        | 0x887A_0007 // DXGI_ERROR_DEVICE_RESET
+        | 0x887A_0020 // DXGI_ERROR_DRIVER_INTERNAL_ERROR
+    )
+}
+
+/// Queries the underlying `ID3D12Device::GetDeviceRemovedReason` to determine
+/// whether the D3D12 device has entered the removed state.
+pub(crate) fn poll_device_removed_reason(device: &wgpu::Device) -> Option<String> {
+    let hal_device = unsafe { device.as_hal::<dx12::Api>() }?;
+    match unsafe { hal_device.raw_device().GetDeviceRemovedReason() } {
+        Ok(()) => None,
+        Err(e) => Some(format!(
+            "ID3D12Device::GetDeviceRemovedReason={:#010x} ({e})",
+            e.code().0
+        )),
+    }
+}
+
 /// D3D12 can always open a shared handle; whether the *frame* opens is a
 /// per-import question and whether this is CEF's adapter is the caller's.
 pub(crate) fn open_device(adapter: &wgpu::Adapter) -> Result<Opened, SurfaceLost> {
@@ -103,6 +128,23 @@ impl Importer {
         }
         .map_err(|e| {
             let coded = frame.coded();
+            let removed_reason = poll_device_removed_reason(device).or_else(|| {
+                is_device_removed_hresult(e.code()).then(|| {
+                    format!(
+                        "OpenSharedHandle returned device-removed hr={:#010x} ({e})",
+                        e.code().0
+                    )
+                })
+            });
+            if let Some(reason) = removed_reason {
+                tracing::error!(
+                    "gpu_paint [cef-shared-import]: D3D12 device lost during OpenSharedHandle (handle={handle:?}, coded={}x{}, hr={:#010x}): {reason}",
+                    coded.w,
+                    coded.h,
+                    e.code().0,
+                );
+                return ImportFailed::device_lost("OpenSharedHandle", reason);
+            }
             tracing::warn!(
                 "gpu_paint [cef-shared-import]: D3D12 OpenSharedHandle failed (handle={handle:?}, coded={}x{}, hr={:#010x}): {e:?}",
                 coded.w,
@@ -205,5 +247,24 @@ mod tests {
             Some(wgpu::TextureFormat::Rgba8Unorm)
         );
         assert_eq!(wgpu_format(DXGI_FORMAT_R16G16B16A16_FLOAT), None);
+    }
+
+    #[test]
+    fn device_removed_hresult_recognizes_dxgi_removal_codes() {
+        assert!(is_device_removed_hresult(windows::core::HRESULT(
+            0x887A_0005_u32 as i32
+        )));
+        assert!(is_device_removed_hresult(windows::core::HRESULT(
+            0x887A_0006_u32 as i32
+        )));
+        assert!(is_device_removed_hresult(windows::core::HRESULT(
+            0x887A_0007_u32 as i32
+        )));
+        assert!(is_device_removed_hresult(windows::core::HRESULT(
+            0x887A_0020_u32 as i32
+        )));
+        assert!(!is_device_removed_hresult(windows::core::HRESULT(
+            0x8007_0057_u32 as i32
+        )));
     }
 }

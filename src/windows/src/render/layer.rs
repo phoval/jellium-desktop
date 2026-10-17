@@ -21,9 +21,30 @@ pub(crate) struct Layer {
     /// itself, so no painter is ever built for it and no frame is ever
     /// accepted here.
     external: bool,
+    /// Physical-pixel offset inside the parent visual, retained so a rebuilt
+    /// DirectComposition visual tree restores the exact placement.
+    offset: (f32, f32),
+    /// Visibility state set through `IDCompositionVisual3::SetVisible`,
+    /// retained across visual tree recreation.
+    visible: bool,
     /// Set whenever a present changed the visual's content binding; drained by
     /// [`Layer::take_needs_commit`].
     needs_commit: bool,
+}
+
+/// Outcome of presenting a frame to a [`Layer`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum LayerPresentOutcome {
+    /// The frame reached the swapchain's commit stream.
+    Presented,
+    /// The frame was deferred or rejected without losing the process-wide GPU device.
+    Rejected,
+    /// The underlying GPU device generation was lost and requires coordinated
+    /// invalidation and device recovery across all surfaces.
+    DeviceLost {
+        failed_generation: u64,
+        reason: String,
+    },
 }
 
 /// Diagnostic classification for a failed frame presentation on Windows.
@@ -32,6 +53,7 @@ pub(crate) struct FailureDiagnostic {
     pub(crate) subsystem: &'static str,
     pub(crate) detail: String,
     pub(crate) surface_lost: bool,
+    pub(crate) device_lost: bool,
 }
 
 pub(crate) fn diagnose_present_failure(part: Part, err: &PresentFailed) -> FailureDiagnostic {
@@ -40,11 +62,13 @@ pub(crate) fn diagnose_present_failure(part: Part, err: &PresentFailed) -> Failu
             subsystem: "[overlay-d3d12]",
             detail: format!("swapchain deferred frame ({part:?})"),
             surface_lost: false,
+            device_lost: false,
         },
         PresentFailed::Import(reason) => FailureDiagnostic {
             subsystem: "[cef-shared-import]",
             detail: format!("frame rejected ({part:?}): shared-texture import failed ({reason})"),
             surface_lost: false,
+            device_lost: false,
         },
         PresentFailed::Kind => FailureDiagnostic {
             subsystem: "[cef-shared-import]",
@@ -52,11 +76,13 @@ pub(crate) fn diagnose_present_failure(part: Part, err: &PresentFailed) -> Failu
                 "frame rejected ({part:?}): frame kind changed on a live latched surface"
             ),
             surface_lost: false,
+            device_lost: false,
         },
         PresentFailed::Lost(e) => FailureDiagnostic {
             subsystem: "[overlay-d3d12]",
             detail: format!("present failed, surface lost ({part:?}): {e}"),
             surface_lost: true,
+            device_lost: e.is_device_lost(),
         },
     }
 }
@@ -67,6 +93,8 @@ impl Layer {
             visual,
             painter: None,
             external: false,
+            offset: (0.0, 0.0),
+            visible: true,
             needs_commit: false,
         }
     }
@@ -75,11 +103,31 @@ impl Layer {
         &self.visual
     }
 
+    #[cfg(test)]
+    pub(crate) fn offset(&self) -> (f32, f32) {
+        self.offset
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    #[cfg(test)]
+    pub(crate) fn painter_generation(&self) -> Option<u64> {
+        self.painter.as_ref().map(Painter::device_generation)
+    }
+
     /// Physical-pixel offset of the visual inside its parent.
     pub(crate) fn set_offset(&mut self, x: f32, y: f32) {
+        self.offset = (x, y);
+        self.apply_offset();
+    }
+
+    fn apply_offset(&self) {
         unsafe {
-            let _ = self.visual.SetOffsetX2(x);
-            let _ = self.visual.SetOffsetY2(y);
+            let _ = self.visual.SetOffsetX2(self.offset.0);
+            let _ = self.visual.SetOffsetY2(self.offset.1);
         }
     }
 
@@ -94,11 +142,38 @@ impl Layer {
         }
     }
 
+    /// Invalidates and drops any bound swapchain painter during coordinated GPU
+    /// device-loss recovery, detaching the visual's content so no reference to
+    /// the lost device's swapchain remains attached to the composition tree.
+    pub(crate) fn invalidate_painter(&mut self) {
+        if self.painter.take().is_some() {
+            self.clear_content();
+            self.needs_commit = true;
+        }
+    }
+
+    /// Replaces the underlying `IDCompositionVisual` when the DirectComposition
+    /// device itself is recreated, restoring stored offset and visibility state.
+    pub(crate) fn replace_visual(&mut self, visual: IDCompositionVisual) {
+        self.painter = None;
+        self.visual = visual;
+        self.apply_offset();
+        if !self.visible {
+            self.apply_visible();
+        }
+        self.needs_commit = true;
+    }
+
     /// Sets the visual's visibility through `IDCompositionVisual3::SetVisible`.
     /// The swapchain's binding to the visual is untouched, so a layer shown
     /// again presents into the visual it was already bound to, and an
     /// externally presented layer keeps its content across a hide.
-    pub(crate) fn set_visible(&self, visible: bool) {
+    pub(crate) fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+        self.apply_visible();
+    }
+
+    fn apply_visible(&self) {
         let visual3: IDCompositionVisual3 = match self.visual.cast() {
             Ok(visual3) => visual3,
             Err(e) => {
@@ -106,7 +181,7 @@ impl Layer {
                 return;
             }
         };
-        if let Err(e) = unsafe { visual3.SetVisible(visible) } {
+        if let Err(e) = unsafe { visual3.SetVisible(self.visible) } {
             tracing::error!(target: "platform", "[overlay-d3d12] SetVisible failed: {e:?}");
         }
     }
@@ -128,31 +203,45 @@ impl Layer {
         Some(WindowTarget::CompositionVisual { visual })
     }
 
-    /// Whether a frame of `size` can be handed to this layer, building the
-    /// swapchain from `size` on first use. Asked before a frame is consumed,
-    /// so a layer that cannot present one never claims it.
-    pub(crate) fn ready(&mut self, part: Part, size: FrameSize) -> bool {
+    /// Ensures a painter is ready for a frame of `size`, building the swapchain
+    /// from `size` on first use or after recovery.
+    fn ensure_painter(&mut self, part: Part, size: FrameSize) -> Result<(), LayerPresentOutcome> {
         if self.external {
-            return false;
+            return Err(LayerPresentOutcome::Rejected);
         }
-        self.painter.is_some() || self.build_painter(part, size)
+        if self.painter.is_some() {
+            return Ok(());
+        }
+        self.build_painter(part, size)
     }
 
     /// Presents CPU pixels, latching the copied kind on this layer's first
-    /// frame. Reports whether the frame reached the swapchain's commit stream.
-    pub(crate) fn present_pixels(&mut self, part: Part, pixels: Pixels<'_>) -> bool {
+    /// frame. Reports whether the frame reached the swapchain's commit stream
+    /// or triggered device-loss recovery.
+    pub(crate) fn present_pixels(&mut self, part: Part, pixels: Pixels<'_>) -> LayerPresentOutcome {
+        if let Err(outcome) = self.ensure_painter(part, pixels.size) {
+            return outcome;
+        }
         let Some(painter) = self.painter.as_mut() else {
-            return false;
+            return LayerPresentOutcome::Rejected;
         };
         let outcome = painter.present_pixels(pixels, || {});
         self.settle(part, outcome)
     }
 
     /// Presents a shared texture, latching the shared kind on this layer's
-    /// first frame. Reports whether the frame reached the commit stream.
-    pub(crate) fn present_shared(&mut self, part: Part, texture: &SharedTexture) -> bool {
+    /// first frame. Reports whether the frame reached the commit stream or
+    /// triggered device-loss recovery.
+    pub(crate) fn present_shared(
+        &mut self,
+        part: Part,
+        texture: &SharedTexture,
+    ) -> LayerPresentOutcome {
+        if let Err(outcome) = self.ensure_painter(part, texture.coded()) {
+            return outcome;
+        }
         let Some(painter) = self.painter.as_mut() else {
-            return false;
+            return LayerPresentOutcome::Rejected;
         };
         let outcome = painter.present_shared(texture, || {});
         self.settle(part, outcome)
@@ -161,7 +250,7 @@ impl Layer {
     /// Records whether the visual's content binding changed (a configure bound
     /// the swapchain, or a failure severed it), so the device must `Commit` to
     /// publish it; plain presents flip the bound swapchain without one.
-    fn settle<T>(&mut self, part: Part, outcome: Result<T, PresentFailed>) -> bool {
+    fn settle<T>(&mut self, part: Part, outcome: Result<T, PresentFailed>) -> LayerPresentOutcome {
         match outcome {
             Ok(_presented) => {
                 if let Some(painter) = self.painter.as_ref()
@@ -169,21 +258,31 @@ impl Layer {
                 {
                     self.needs_commit = true;
                 }
-                true
+                LayerPresentOutcome::Presented
             }
             Err(err) => {
                 let diag = diagnose_present_failure(part, &err);
                 if diag.surface_lost {
                     tracing::error!(target: "platform", "{} {}", diag.subsystem, diag.detail);
+                    let failed_generation = self.painter.as_ref().map_or_else(
+                        || device::gpu().map_or(1, jfn_gpu_paint::Surfaces::current_generation),
+                        Painter::device_generation,
+                    );
                     self.painter = None;
                     self.clear_content();
                     self.needs_commit = true;
+                    if diag.device_lost {
+                        return LayerPresentOutcome::DeviceLost {
+                            failed_generation,
+                            reason: diag.detail,
+                        };
+                    }
                 } else if matches!(err, PresentFailed::Deferred(_)) {
                     tracing::debug!(target: "platform", "{} {}", diag.subsystem, diag.detail);
                 } else {
                     tracing::warn!(target: "platform", "{} {}", diag.subsystem, diag.detail);
                 }
-                false
+                LayerPresentOutcome::Rejected
             }
         }
     }
@@ -194,7 +293,7 @@ impl Layer {
         std::mem::take(&mut self.needs_commit)
     }
 
-    fn build_painter(&mut self, part: Part, size: FrameSize) -> bool {
+    fn build_painter(&mut self, part: Part, size: FrameSize) -> Result<(), LayerPresentOutcome> {
         let Some(gpu) = device::gpu() else {
             tracing::error!(
                 target: "platform",
@@ -202,7 +301,7 @@ impl Layer {
                 size.w,
                 size.h,
             );
-            return false;
+            return Err(LayerPresentOutcome::Rejected);
         };
         let Some(visual) = NonNull::new(self.visual.as_raw()) else {
             tracing::error!(
@@ -211,12 +310,13 @@ impl Layer {
                 size.w,
                 size.h,
             );
-            return false;
+            return Err(LayerPresentOutcome::Rejected);
         };
+        let current_generation = gpu.current_generation();
         match gpu.new_surface(WindowTarget::CompositionVisual { visual }, size) {
             Ok(painter) => {
                 self.painter = Some(painter);
-                true
+                Ok(())
             }
             Err(e) => {
                 tracing::error!(
@@ -225,7 +325,14 @@ impl Layer {
                     size.w,
                     size.h,
                 );
-                false
+                if e.is_device_lost() {
+                    Err(LayerPresentOutcome::DeviceLost {
+                        failed_generation: current_generation,
+                        reason: e.to_string(),
+                    })
+                } else {
+                    Err(LayerPresentOutcome::Rejected)
+                }
             }
         }
     }
@@ -243,11 +350,13 @@ mod tests {
         assert_eq!(import_diag.subsystem, "[cef-shared-import]");
         assert!(import_diag.detail.contains("OpenSharedHandle"));
         assert!(!import_diag.surface_lost);
+        assert!(!import_diag.device_lost);
 
         let kind_diag = diagnose_present_failure(Part::Popup, &PresentFailed::Kind);
         assert_eq!(kind_diag.subsystem, "[cef-shared-import]");
         assert!(kind_diag.detail.contains("Popup"));
         assert!(!kind_diag.surface_lost);
+        assert!(!kind_diag.device_lost);
     }
 
     #[test]
@@ -256,5 +365,6 @@ mod tests {
             diagnose_present_failure(Part::Content, &PresentFailed::Deferred(Deferred::new()));
         assert_eq!(deferred.subsystem, "[overlay-d3d12]");
         assert!(!deferred.surface_lost);
+        assert!(!deferred.device_lost);
     }
 }

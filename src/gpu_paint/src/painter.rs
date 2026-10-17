@@ -12,7 +12,9 @@ use raw_window_handle::{
     XcbWindowHandle,
 };
 
-use crate::context::{FORMAT, Surfaces};
+use std::sync::Arc;
+
+use crate::context::{DeviceGeneration, FORMAT, Surfaces};
 use crate::error::{Kind, SurfaceLost};
 use crate::shared::Importer;
 use crate::types::{Deferred, PaintMode, Pixels, Presented, WindowTarget};
@@ -132,6 +134,7 @@ impl ConfigureSite {
 
 pub struct Surface<'a> {
     ctx: &'a Surfaces,
+    device: Arc<DeviceGeneration>,
     // 'static is a lie that wgpu accepts via `create_surface_unsafe`;
     // the caller guarantees the window outlives the painter (X11 owns
     // the xcb_window for the surface lifetime, Wayland likewise).
@@ -215,6 +218,7 @@ impl<'a> Surface<'a> {
         target: WindowTarget,
         size: FrameSize,
     ) -> Result<Self, SurfaceLost> {
+        let device = ctx.active_generation()?;
         let policy = SizePolicy::for_target(&target);
         let alpha = AlphaSource::for_target(&target);
         let present = PresentPolicy::for_target(&target);
@@ -225,7 +229,7 @@ impl<'a> Surface<'a> {
             _ => None,
         });
         let extent = texels(size).ok_or(Kind::BadDimensions(size))?;
-        let max = ctx.max_texture_dim;
+        let max = device.max_texture_dim;
         if extent.0 > max || extent.1 > max {
             return Err(Kind::BadDimensions(size).into());
         }
@@ -233,13 +237,13 @@ impl<'a> Surface<'a> {
         // SAFETY: the caller of `Surfaces::new_surface` guarantees the
         // target's window/layer outlives this painter (see the `surface`
         // field note).
-        let surface = unsafe { create_surface(&ctx.instance, target)? };
+        let surface = unsafe { create_surface(&device.instance, target)? };
 
-        if !ctx.adapter.is_surface_supported(&surface) {
+        if !device.adapter.is_surface_supported(&surface) {
             return Err(Kind::SurfaceUnsupported.into());
         }
 
-        let caps = surface.get_capabilities(&ctx.adapter);
+        let caps = surface.get_capabilities(&device.adapter);
         let alpha_mode = pick_alpha_mode(&caps);
 
         let config = wgpu::SurfaceConfiguration {
@@ -255,6 +259,7 @@ impl<'a> Surface<'a> {
 
         let painter = Self {
             ctx,
+            device,
             surface,
             config,
             importer: Importer::new(),
@@ -276,9 +281,14 @@ impl<'a> Surface<'a> {
         Ok(painter)
     }
 
+    /// The GPU device generation this surface was bound to.
+    pub fn device_generation(&self) -> u64 {
+        self.device.generation
+    }
+
     /// Configure the swapchain and restore anything wgpu overwrote doing it.
     fn configure_now(&self) {
-        self.ctx.configure_surface(&self.surface, &self.config);
+        self.device.configure_surface(&self.surface, &self.config);
         self.configured.set(true);
         self.after_configure();
     }
@@ -314,7 +324,7 @@ impl<'a> Surface<'a> {
     fn after_configure(&self) {}
 
     fn clamp_extent(&self, size: (u32, u32)) -> (u32, u32) {
-        let max = self.ctx.max_texture_dim.max(1);
+        let max = self.device.max_texture_dim.max(1);
         (size.0.clamp(1, max), size.1.clamp(1, max))
     }
 
@@ -410,7 +420,7 @@ impl<'a> Surface<'a> {
     /// The frame's extent in texels, rejecting anything the device cannot hold.
     fn frame_extent(&self, size: FrameSize) -> Result<(u32, u32), SurfaceLost> {
         let (w, h) = texels(size).ok_or(Kind::BadDimensions(size))?;
-        let max = self.ctx.max_texture_dim;
+        let max = self.device.max_texture_dim;
         if w > max || h > max {
             return Err(Kind::BadDimensions(size).into());
         }
@@ -429,6 +439,9 @@ impl<'a> Surface<'a> {
         frame: Pixels<'_>,
         on_present: impl FnOnce(),
     ) -> Result<Presented, PresentFailed> {
+        if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+            return Err(PresentFailed::Lost(loss));
+        }
         self.latch(PaintMode::Copied)?;
         let (fw, fh) = self.frame_extent(frame.size)?;
         check_buffer(&frame, fw, fh)?;
@@ -437,7 +450,7 @@ impl<'a> Surface<'a> {
 
         // Upload matches the swapchain, so the fullscreen quad is always 1:1.
         let mut upload = self.take_upload(cw, ch);
-        upload.write(&self.ctx.queue, &frame, cw, ch);
+        upload.write(&self.device.queue, &frame, cw, ch);
         let bind_group = upload.bind_group.clone();
         self.upload = Some(upload);
         self.draw_and_present(&bind_group, None, None, on_present)
@@ -450,6 +463,9 @@ impl<'a> Surface<'a> {
         frame: &SharedTexture,
         on_present: impl FnOnce(),
     ) -> Result<Presented, PresentFailed> {
+        if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+            return Err(PresentFailed::Lost(loss));
+        }
         self.latch(PaintMode::Shared)?;
         let (fw, fh) = self.frame_extent(frame.coded())?;
 
@@ -464,21 +480,29 @@ impl<'a> Surface<'a> {
             SizePolicy::FollowTarget => Some((0.0, 0.0, fw.min(cw) as f32, fh.min(ch) as f32)),
         };
 
-        // A failed import is not a lost surface: a shared frame has no CPU
-        // pixels, so there is nowhere to degrade to. The last good frame stays
-        // on screen and the producer owes the successor.
-        let imported = match self.importer.import(&self.ctx.device, frame) {
+        // A per-frame import failure is not a lost surface: a shared frame has
+        // no CPU pixels, so there is nowhere to degrade to. However, when the
+        // import failed because the underlying GPU device itself was lost or
+        // removed, escalate to `PresentFailed::Lost` so coordinated recovery runs.
+        let imported = match self.importer.import(&self.device.device, frame) {
             Ok(imported) => imported,
             Err(e) => {
+                if let Some(reason) = e.device_lost {
+                    let recorded = self.ctx.report_generation_lost(&self.device, reason);
+                    return Err(PresentFailed::Lost(SurfaceLost::device_lost(recorded)));
+                }
+                if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+                    return Err(PresentFailed::Lost(loss));
+                }
                 tracing::warn!("gpu_paint [cef-shared-import]: {e}");
-                return Err(PresentFailed::Import(e.0));
+                return Err(PresentFailed::Import(e.reason));
             }
         };
         // A reused import is the importer's cached texture, so the bind group
         // over it is reusable too; anything else must be rebound.
         let bind_group = match self.shared_bind.take() {
             Some(bind_group) if imported.reused => bind_group,
-            _ => bind_texture(self.ctx, "jfn_gpu_paint shared bg", &imported.texture),
+            _ => bind_texture(&self.device, "jfn_gpu_paint shared bg", &imported.texture),
         };
         let result = self.draw_and_present(&bind_group, imported.acquire, viewport, on_present);
         self.shared_bind = Some(bind_group);
@@ -489,7 +513,7 @@ impl<'a> Surface<'a> {
 
     /// The persistent upload texture at exactly `w`×`h`, reusing the current
     /// one when it matches. Taken out of `self` rather than borrowed so the
-    /// caller can write to it while also borrowing `self.ctx`.
+    /// caller can write to it while also borrowing `self.device`.
     fn take_upload(&mut self, w: u32, h: u32) -> UploadTexture {
         match self.upload.take() {
             Some(upload) if upload.w == w && upload.h == h => upload,
@@ -498,7 +522,7 @@ impl<'a> Surface<'a> {
     }
 
     fn new_upload(&self, w: u32, h: u32) -> UploadTexture {
-        let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+        let tex = self.device.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("jfn_gpu_paint upload"),
             size: wgpu::Extent3d {
                 width: w,
@@ -512,7 +536,7 @@ impl<'a> Surface<'a> {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let bind_group = bind_texture(self.ctx, "jfn_gpu_paint bg", &tex);
+        let bind_group = bind_texture(&self.device, "jfn_gpu_paint bg", &tex);
         UploadTexture {
             tex,
             bind_group,
@@ -524,7 +548,8 @@ impl<'a> Surface<'a> {
 
     /// Acquire the next swapchain frame with no gate held, reconfiguring once
     /// if the swapchain is stale. A swapchain with no texture this cycle is a
-    /// [`PresentFailed::Deferred`], never a fault.
+    /// [`PresentFailed::Deferred`], never a fault, unless the underlying GPU
+    /// device itself has been lost.
     fn acquire_frame(&self) -> Result<AcquiredFrame, PresentFailed> {
         use wgpu::CurrentSurfaceTexture::*;
         let mut reconfigured = false;
@@ -543,6 +568,9 @@ impl<'a> Surface<'a> {
                 // a later edit reintroducing an off-main configure, not a live
                 // path.
                 Suboptimal(_) | Lost | Outdated if self.configure_site == ConfigureSite::Owner => {
+                    if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+                        return Err(PresentFailed::Lost(loss));
+                    }
                     return Err(PresentFailed::Deferred(Deferred::new()));
                 }
                 // The frame is usable, but the swapchain no longer matches the
@@ -557,16 +585,27 @@ impl<'a> Surface<'a> {
                 // ONCE, presenting THIS frame — overlay content is event-driven
                 // and may not repaint for a long time, so a drop leaves it stale.
                 Lost | Outdated if !reconfigured => {
+                    if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+                        return Err(PresentFailed::Lost(loss));
+                    }
                     reconfigured = true;
                     self.configure_now();
                 }
                 // Transient (occluded, timed out, or still stale after reconfigure):
-                // the surface is fine and the frame is still owed, so the caller
-                // presents it again rather than degrading the backend to SHM.
+                // the surface is fine unless the underlying device was removed.
                 Lost | Outdated | Timeout | Occluded => {
+                    if let Some(loss) = self.ctx.check_generation_lost(&self.device) {
+                        return Err(PresentFailed::Lost(loss));
+                    }
                     return Err(PresentFailed::Deferred(Deferred::new()));
                 }
-                Validation => return Err(SurfaceLost::from(Kind::Acquire("validation")).into()),
+                Validation => {
+                    let reason = self.ctx.report_generation_lost(
+                        &self.device,
+                        "swapchain acquire failed validation",
+                    );
+                    return Err(SurfaceLost::device_lost(reason).into());
+                }
             }
         }
     }
@@ -585,26 +624,26 @@ impl<'a> Surface<'a> {
         // The acquire barrier must precede the render pass, in its own
         // command buffer: wgpu 29 forbids mixing raw HAL encoding
         // (`as_hal_mut`) and normal wgpu encoding on one CommandEncoder.
-        let gate = self.ctx.submit_gate.read();
+        let gate = self.device.submit_gate.read();
         if let Some(image) = external_image {
             let mut acquire_encoder =
-                self.ctx
+                self.device
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("jfn_gpu_paint shared acquire enc"),
                     });
-            crate::shared::acquire_barrier(&self.ctx.device, &mut acquire_encoder, image);
-            self.ctx
+            crate::shared::acquire_barrier(&self.device.device, &mut acquire_encoder, image);
+            self.device
                 .queue
                 .submit(std::iter::once(acquire_encoder.finish()));
         }
 
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("jfn_gpu_paint enc"),
-            });
+        let mut encoder =
+            self.device
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("jfn_gpu_paint enc"),
+                });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("jfn_gpu_paint pass"),
@@ -622,7 +661,7 @@ impl<'a> Surface<'a> {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(self.ctx.pipeline(self.alpha));
+            pass.set_pipeline(self.device.pipeline(self.alpha));
             pass.set_bind_group(0, bind_group, &[]);
             // A viewport smaller than the attachment draws the frame 1:1 in the
             // top-left; the cleared remainder stays transparent.
@@ -634,7 +673,7 @@ impl<'a> Surface<'a> {
             }
             pass.draw(0..3, 0..1);
         }
-        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+        self.device.queue.submit(std::iter::once(encoder.finish()));
         // The gate covers the submits alone: a FIFO present blocks until the
         // compositor releases the previous frame, and nothing may be forced to
         // wait behind it.
@@ -723,11 +762,15 @@ fn check_buffer(frame: &Pixels<'_>, fw: u32, fh: u32) -> Result<(), SurfaceLost>
 
 /// The one bind group shape this crate draws with: the texture at binding 0,
 /// the shared nearest sampler at binding 1.
-fn bind_texture(ctx: &Surfaces, label: &str, texture: &wgpu::Texture) -> wgpu::BindGroup {
+fn bind_texture(
+    device: &DeviceGeneration,
+    label: &str,
+    texture: &wgpu::Texture,
+) -> wgpu::BindGroup {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    device.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
-        layout: &ctx.bind_layout,
+        layout: &device.bind_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -735,7 +778,7 @@ fn bind_texture(ctx: &Surfaces, label: &str, texture: &wgpu::Texture) -> wgpu::B
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&ctx.sampler),
+                resource: wgpu::BindingResource::Sampler(&device.sampler),
             },
         ],
     })

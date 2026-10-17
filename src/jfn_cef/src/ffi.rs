@@ -177,7 +177,7 @@ pub(crate) fn jfn_cef_initialize(
         jfn_logging::log(
             jfn_logging::Category::Cef,
             jfn_logging::Level::Info,
-            &format_windows_cef_graphics_baseline(diag, options.disable_gpu_compositing),
+            &format_windows_cef_graphics_baseline(diag.as_ref(), options.disable_gpu_compositing),
         );
     }
     state::configure(state::Config { pending_switches });

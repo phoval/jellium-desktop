@@ -38,7 +38,7 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::DirectComposition::IDCompositionVisual;
 
 use crate::render::device::Devices;
-use crate::render::layer::Layer;
+use crate::render::layer::{Layer, LayerPresentOutcome};
 
 /// Which of a surface's two visuals a call addresses.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -89,6 +89,11 @@ impl Entry {
         }
     }
 
+    fn invalidate_painters(&mut self) {
+        self.content.invalidate_painter();
+        self.popup.invalidate_painter();
+    }
+
     /// Unparents the content visual from `root`; the popup goes with it.
     fn unparent(&mut self, root: &IDCompositionVisual) {
         unsafe {
@@ -98,6 +103,7 @@ impl Entry {
 }
 
 struct Registry {
+    hwnd: Option<HWND>,
     devices: Option<Devices>,
     /// Live surfaces, bottom-to-top: exactly the root visual's children, in
     /// the root's child order.
@@ -108,6 +114,7 @@ struct Registry {
 impl Registry {
     const fn new() -> Registry {
         Registry {
+            hwnd: None,
             devices: None,
             surfaces: Vec::new(),
             next_id: 1,
@@ -119,16 +126,130 @@ impl Registry {
         self.surfaces.iter_mut().find(|e| e.id.0 == id)
     }
 
-    fn commit(&self) {
-        if let Some(devices) = self.devices.as_ref() {
-            devices.commit();
+    fn commit(&self) -> bool {
+        self.devices.as_ref().is_some_and(Devices::commit)
+    }
+
+    fn commit_and_wait(&self) -> bool {
+        self.devices.as_ref().is_some_and(Devices::commit_and_wait)
+    }
+
+    /// Drops every bound swapchain painter across all surfaces and clears
+    /// their composition visual content so no swapchain remains bound to a
+    /// lost GPU device generation.
+    fn invalidate_all_painters(&mut self) {
+        for entry in &mut self.surfaces {
+            entry.invalidate_painters();
+            let _ = entry.content.take_needs_commit();
+            let _ = entry.popup.take_needs_commit();
         }
     }
 
-    fn commit_and_wait(&self) {
-        if let Some(devices) = self.devices.as_ref() {
-            devices.commit_and_wait();
+    /// Rebuilds the DirectComposition device, HWND target, root visual, and
+    /// every live surface's content/popup visuals in their existing z-order,
+    /// restoring stored offsets and visibility states.
+    fn recreate_dcomp_tree(&mut self) -> Result<(), String> {
+        let hwnd = self
+            .hwnd
+            .ok_or_else(|| "target HWND is not recorded".to_owned())?;
+        self.invalidate_all_painters();
+        self.devices = None;
+        let devices = Devices::create(hwnd)
+            .map_err(|e| format!("DirectComposition device recreation failed: {e:?}"))?;
+        let mut prev: Option<IDCompositionVisual> = None;
+        for entry in &mut self.surfaces {
+            let content = devices
+                .new_visual()
+                .map_err(|e| format!("DirectComposition content visual creation failed: {e:?}"))?;
+            let popup = devices
+                .new_visual()
+                .map_err(|e| format!("DirectComposition popup visual creation failed: {e:?}"))?;
+            unsafe {
+                content
+                    .AddVisual(&popup, true, None::<&IDCompositionVisual>)
+                    .map_err(|e| format!("DirectComposition popup nesting failed: {e:?}"))?;
+                match prev.as_ref() {
+                    Some(prev_visual) => devices
+                        .root()
+                        .AddVisual(&content, true, prev_visual)
+                        .map_err(|e| format!("DirectComposition root AddVisual failed: {e:?}"))?,
+                    None => devices
+                        .root()
+                        .AddVisual(&content, false, None::<&IDCompositionVisual>)
+                        .map_err(|e| format!("DirectComposition root AddVisual failed: {e:?}"))?,
+                }
+            }
+            prev = Some(content.clone());
+            entry.content.replace_visual(content);
+            entry.popup.replace_visual(popup);
+            let _ = entry.content.take_needs_commit();
+            let _ = entry.popup.take_needs_commit();
         }
+        if !devices.commit() {
+            return Err("DirectComposition Commit failed on recreated device".to_owned());
+        }
+        self.devices = Some(devices);
+        Ok(())
+    }
+
+    /// Coordinated invalidation and recreation path for GPU device loss:
+    /// 1. Detaches and drops every surface painter bound to the lost device.
+    /// 2. Commits the visual detachment (or recreates the DirectComposition
+    ///    tree if the composition device itself failed).
+    /// 3. Recreates the `jfn_gpu_paint` device generation and verifies adapter
+    ///    LUID and shared-texture compatibility with CEF.
+    /// 4. Initiates application shutdown if recovery requires a restart.
+    fn recover_from_device_loss(
+        &mut self,
+        failed_generation: u64,
+        reason: &str,
+    ) -> jfn_gpu_paint::DeviceRecoveryOutcome {
+        tracing::warn!(
+            target: "platform",
+            "[overlay-d3d12] initiating coordinated GPU device-loss recovery from generation {failed_generation}: {reason}"
+        );
+        self.invalidate_all_painters();
+        if !self.commit()
+            && let Err(dcomp_err) = self.recreate_dcomp_tree()
+        {
+            let restart_reason =
+                format!("{reason}; DirectComposition recovery failed: {dcomp_err}");
+            tracing::error!(
+                target: "platform",
+                "[overlay-d3d12] [cef-shared-import] GPU device-loss recovery requires application restart: {restart_reason}"
+            );
+            jfn_playback::shutdown::jfn_shutdown_initiate();
+            return jfn_gpu_paint::DeviceRecoveryOutcome::RestartRequired {
+                generation: failed_generation,
+                reason: restart_reason,
+            };
+        }
+        let Some(gpu) = crate::render::device::gpu() else {
+            let restart_reason =
+                format!("{reason}; overlay D3D12 device coordinator is unavailable");
+            tracing::error!(
+                target: "platform",
+                "[overlay-d3d12] [cef-shared-import] GPU device-loss recovery requires application restart: {restart_reason}"
+            );
+            jfn_playback::shutdown::jfn_shutdown_initiate();
+            return jfn_gpu_paint::DeviceRecoveryOutcome::RestartRequired {
+                generation: failed_generation,
+                reason: restart_reason,
+            };
+        };
+        let outcome = gpu.recover_generation(failed_generation, reason);
+        if let jfn_gpu_paint::DeviceRecoveryOutcome::RestartRequired {
+            generation,
+            ref reason,
+        } = outcome
+        {
+            tracing::error!(
+                target: "platform",
+                "[overlay-d3d12] [cef-shared-import] GPU device-loss recovery at generation {generation} requires application restart: {reason}"
+            );
+            jfn_playback::shutdown::jfn_shutdown_initiate();
+        }
+        outcome
     }
 }
 
@@ -164,6 +285,7 @@ pub(crate) fn init(hwnd: HWND) -> Result<(), jfn_platform_abi::PlatformInitError
         Devices::create(hwnd)
             .map_err(|e| Error::backend("DirectComposition device creation", e))?,
     );
+    st.hwnd = Some(hwnd);
     Ok(())
 }
 
@@ -180,8 +302,9 @@ pub(crate) fn cleanup() {
         }
     }
     surfaces.clear();
-    st.commit();
+    let _ = st.commit();
     st.devices = None;
+    st.hwnd = None;
 }
 
 /// Allocate a surface: a content visual parented on top of the root and a
@@ -199,7 +322,7 @@ pub(crate) fn alloc() -> SurfaceHandle {
             return SurfaceHandle::NONE;
         }
     };
-    devices.commit();
+    let _ = devices.commit();
     st.next_id += 1;
     st.surfaces.push(entry);
     SurfaceHandle::from_id(id.0)
@@ -215,7 +338,7 @@ pub(crate) fn free(h: SurfaceHandle) {
     let mut entry = st.surfaces.remove(pos);
     if let Some(devices) = st.devices.as_ref() {
         entry.unparent(devices.root());
-        devices.commit();
+        let _ = devices.commit();
     }
 }
 
@@ -260,7 +383,7 @@ pub(crate) fn apply_stack(ordered: &[SurfaceHandle]) {
     }
 
     *surfaces = named;
-    st.commit();
+    let _ = st.commit();
 }
 
 /// Set a surface's content visual to `visibility`, publish it, and wait for
@@ -271,7 +394,7 @@ pub(crate) fn set_visibility(h: SurfaceHandle, visibility: Visibility) -> Visibi
     if let Some(entry) = st.find_mut(h) {
         entry.content.set_visible(visibility.is_shown());
     }
-    st.commit_and_wait();
+    let _ = st.commit_and_wait();
     VisibilityCommit::issued(visibility, Ack::immediate())
 }
 
@@ -322,9 +445,50 @@ fn frame_extent(content: &Content<'_>) -> Result<FrameSize, (&'static str, Strin
     }
 }
 
+fn present_once(
+    st: &mut Registry,
+    h: SurfaceHandle,
+    part: Part,
+    size: FrameSize,
+    content: &Content<'_>,
+) -> LayerPresentOutcome {
+    let (outcome, needs_commit) = {
+        let Some(entry) = st.find_mut(h) else {
+            return LayerPresentOutcome::Rejected;
+        };
+        let layer = entry.layer_mut(part);
+        let outcome = match content {
+            Content::Accelerated(tex) => layer.present_shared(part, tex),
+            Content::Software { pixels, dirty, .. } => layer.present_pixels(
+                part,
+                Pixels {
+                    size,
+                    stride: size.w as u32 * 4,
+                    bgra: pixels,
+                    dirty,
+                },
+            ),
+        };
+        (outcome, layer.take_needs_commit())
+    };
+    if needs_commit && !st.commit() {
+        let failed_generation =
+            crate::render::device::gpu().map_or(1, jfn_gpu_paint::Surfaces::current_generation);
+        return LayerPresentOutcome::DeviceLost {
+            failed_generation,
+            reason: "DirectComposition Commit failed after swapchain configure".to_owned(),
+        };
+    }
+    outcome
+}
+
 /// Present one frame to `part`. The frame comes back undischarged when the
 /// surface is gone, the content carries no picture, or the layer has no
 /// swapchain to take it.
+///
+/// When the underlying GPU device was lost, runs coordinated surface
+/// invalidation and device recreation once, resuming presentation on the
+/// recreated device if compatible or initiating shutdown if restart is required.
 pub(crate) fn present<'a>(
     h: SurfaceHandle,
     part: Part,
@@ -350,34 +514,22 @@ pub(crate) fn present<'a>(
             return Err(frame);
         }
     };
-    let (presented, needs_commit) = {
-        let Some(entry) = st.find_mut(h) else {
-            return Err(frame);
-        };
-        let layer = entry.layer_mut(part);
-        if !layer.ready(part, size) {
-            return Err(frame);
-        }
-        let presented = match frame.content() {
-            Content::Accelerated(tex) => layer.present_shared(part, tex),
-            Content::Software { pixels, dirty, .. } => layer.present_pixels(
-                part,
-                Pixels {
-                    size,
-                    stride: size.w as u32 * 4,
-                    bgra: pixels,
-                    dirty,
-                },
-            ),
-        };
-        (presented, layer.take_needs_commit())
+    let outcome = match present_once(&mut st, h, part, size, frame.content()) {
+        LayerPresentOutcome::Presented => LayerPresentOutcome::Presented,
+        LayerPresentOutcome::Rejected => LayerPresentOutcome::Rejected,
+        LayerPresentOutcome::DeviceLost {
+            failed_generation,
+            reason,
+        } => match st.recover_from_device_loss(failed_generation, &reason) {
+            jfn_gpu_paint::DeviceRecoveryOutcome::Recovered { .. } => {
+                present_once(&mut st, h, part, size, frame.content())
+            }
+            jfn_gpu_paint::DeviceRecoveryOutcome::RestartRequired { .. } => {
+                LayerPresentOutcome::Rejected
+            }
+        },
     };
-    if needs_commit {
-        st.commit();
-    }
-    if !presented {
-        // The surface is fine and the frame never entered a commit stream, so
-        // its producer owes the successor.
+    if outcome != LayerPresentOutcome::Presented {
         return Err(frame);
     }
     Ok(frame.present(|_content| Presented::issued()))
@@ -390,7 +542,7 @@ pub(crate) fn resize(h: SurfaceHandle, size: SurfaceSize) {
         return;
     };
     entry.content.set_offset(0.0, size.physical_top as f32);
-    st.commit();
+    let _ = st.commit();
 }
 
 /// The content `IDCompositionVisual` for `h`.
@@ -415,7 +567,7 @@ pub(crate) fn popup_show(h: SurfaceHandle, x: c_int, y: c_int) {
         return;
     };
     entry.popup.set_offset(px as f32, py as f32);
-    st.commit();
+    let _ = st.commit();
 }
 
 /// Detach the popup visual's content, so reopening it cannot flash the frame
@@ -426,14 +578,43 @@ pub(crate) fn popup_hide(h: SurfaceHandle) {
         return;
     };
     entry.popup.detach();
-    st.commit();
+    let _ = st.commit();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jfn_gpu_paint::SharedTexture;
+    use jfn_gpu_paint::{DeviceLifecycleState, SharedTexture};
     use jfn_platform_abi::PhysicalSize;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow};
+    use windows::core::w;
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    fn create_test_window() -> windows_core::Result<TestWindow> {
+        Ok(TestWindow(unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!(""),
+                Default::default(),
+                0,
+                0,
+                64,
+                64,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?))
+    }
 
     #[test]
     fn frame_extent_attributes_null_or_bad_shared_texture_to_cef_shared_import() {
@@ -481,5 +662,116 @@ mod tests {
             err.as_ref()
                 .is_some_and(|(_, msg)| msg.contains("unusable software frame"))
         );
+    }
+
+    #[test]
+    fn recreate_dcomp_tree_preserves_surface_order_offsets_and_visibility()
+    -> windows_core::Result<()> {
+        let window = create_test_window()?;
+        let devices = Devices::create(window.0)?;
+        let mut registry = Registry {
+            hwnd: Some(window.0),
+            devices: Some(devices),
+            surfaces: Vec::new(),
+            next_id: 1,
+        };
+        if let Some(dev) = registry.devices.as_ref() {
+            let mut first = Entry::create(dev, SurfaceId(1))?;
+            first.content.set_offset(0.0, 36.0);
+            first.content.set_visible(false);
+            first.popup.set_offset(120.0, 240.0);
+            let mut second = Entry::create(dev, SurfaceId(2))?;
+            second.content.set_offset(0.0, 48.0);
+            registry.surfaces.push(first);
+            registry.surfaces.push(second);
+        }
+
+        assert_eq!(registry.recreate_dcomp_tree(), Ok(()));
+        assert_eq!(registry.surfaces.len(), 2);
+        assert_eq!(registry.surfaces[0].id, SurfaceId(1));
+        assert_eq!(registry.surfaces[0].content.offset(), (0.0, 36.0));
+        assert!(!registry.surfaces[0].content.is_visible());
+        assert_eq!(registry.surfaces[0].popup.offset(), (120.0, 240.0));
+        assert_eq!(registry.surfaces[1].id, SurfaceId(2));
+        assert_eq!(registry.surfaces[1].content.offset(), (0.0, 48.0));
+        assert!(registry.surfaces[1].content.is_visible());
+        Ok(())
+    }
+
+    #[test]
+    fn injected_device_loss_invalidates_dependent_surfaces_and_resumes_frames_on_compatible_device()
+    -> windows_core::Result<()> {
+        struct NoopSource;
+        impl jfn_platform_abi::FrameSource for NoopSource {
+            fn request_frame(&self) {}
+        }
+
+        let Some(gpu) = crate::render::device::gpu() else {
+            return Ok(());
+        };
+        let window = create_test_window()?;
+        cleanup();
+        assert!(init(window.0).is_ok());
+
+        let s1 = alloc();
+        let s2 = alloc();
+        let pixels = [0xff_u8; 4 * 4 * 4];
+        let size = PhysicalSize { w: 4, h: 4 };
+        let source: std::sync::Arc<dyn jfn_platform_abi::FrameSource> =
+            std::sync::Arc::new(NoopSource);
+
+        let first_frame = PaintFrame::software(std::sync::Arc::clone(&source), size, &pixels, &[]);
+        assert!(present(s1, Part::Content, first_frame).is_ok());
+        let second_frame = PaintFrame::software(std::sync::Arc::clone(&source), size, &pixels, &[]);
+        assert!(present(s2, Part::Content, second_frame).is_ok());
+
+        let initial_gen = gpu.current_generation();
+        assert_eq!(
+            gpu.lifecycle_state(),
+            DeviceLifecycleState::Healthy {
+                generation: initial_gen
+            }
+        );
+
+        // Inject a simulated GPU device loss on the active generation.
+        let lost_state = gpu.report_device_lost("simulated DXGI_ERROR_DEVICE_REMOVED");
+        assert_eq!(
+            lost_state,
+            DeviceLifecycleState::Lost {
+                generation: initial_gen,
+                reason: "simulated DXGI_ERROR_DEVICE_REMOVED".to_owned(),
+            }
+        );
+
+        // Presenting the next frame triggers coordinated invalidation of both
+        // surfaces, recreates a compatible D3D12 device on the pinned LUID, and
+        // resumes presentation on the new generation without dropping the frame.
+        let recovery_frame = PaintFrame::software(source, size, &pixels, &[]);
+        assert!(present(s1, Part::Content, recovery_frame).is_ok());
+
+        let recovered_gen = gpu.current_generation();
+        assert_eq!(recovered_gen, initial_gen + 1);
+        assert_eq!(
+            gpu.lifecycle_state(),
+            DeviceLifecycleState::Healthy {
+                generation: recovered_gen
+            }
+        );
+        {
+            let mut st = STATE.lock();
+            assert_eq!(
+                st.find_mut(s1).and_then(|e| e.content.painter_generation()),
+                Some(recovered_gen)
+            );
+            // The sibling surface's stale painter was invalidated during recovery
+            // and will lazily rebuild on `recovered_gen` when next presented.
+            assert_eq!(
+                st.find_mut(s2).and_then(|e| e.content.painter_generation()),
+                None
+            );
+        }
+
+        cleanup();
+        Ok(())
     }
 }
