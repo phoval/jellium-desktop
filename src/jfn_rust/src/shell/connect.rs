@@ -6,6 +6,7 @@
 //! Ported from the former `web/overlay.html`, `web/overlay.js` and
 //! `web/connectivityHelper.js`.
 
+use iced_core::Widget as _;
 use std::time::Instant;
 
 use iced_core::widget::Id;
@@ -54,7 +55,7 @@ impl Connect {
             Screen::Working { .. } => self.spinner_view(),
             Screen::Form { url } => self.form_view(url),
             // The web frame is visible during retirement; keep only the fading backdrop.
-            Screen::Retiring { .. } | Screen::Gone => iced_widget::space::horizontal().into(),
+            Screen::Retiring { .. } | Screen::Gone => iced_widget::space::horizontal()._boxed(),
         };
         container(body)
             .width(Length::Fill)
@@ -63,7 +64,7 @@ impl Connect {
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
             .class(theme::ContainerClass::Backdrop)
-            .into()
+            ._boxed()
     }
 
     fn form_view<'a>(&'a self, url: &'a str) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
@@ -85,7 +86,7 @@ impl Connect {
         .spacing(16)
         .width(Length::Fixed(450.0))
         .align_x(Alignment::Center)
-        .into()
+        ._boxed()
     }
 
     fn spinner_view(&self) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
@@ -97,7 +98,7 @@ impl Connect {
         ]
         .spacing(32)
         .align_x(Alignment::Center)
-        .into()
+        ._boxed()
     }
 
     fn failure_view(&self) -> Element<'_, Message, Theme, iced_wgpu::Renderer> {
@@ -110,7 +111,7 @@ impl Connect {
         ]
         .spacing(32)
         .align_x(Alignment::Center)
-        .into()
+        ._boxed()
     }
 
     /// `chrome` opaque while the screen is up, faded to zero alpha across the

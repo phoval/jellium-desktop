@@ -1,5 +1,6 @@
 //! The titlebar view and the state the rest of the process pushes into it.
 
+use iced_core::Widget as _;
 use parking_lot::Mutex;
 
 use crate::shell::state::ChromeInputs;
@@ -124,7 +125,7 @@ impl Titlebar {
         .width(Length::Fill)
         .height(height)
         .class(theme::ContainerClass::Chrome)
-        .into()
+        ._boxed()
     }
 
     pub fn update(&mut self, message: Message) {
@@ -161,7 +162,7 @@ fn control(
     .height(Length::Fill)
     .padding(0)
     .class(class)
-    .into()
+    ._boxed()
 }
 
 impl<Message> canvas::Program<Message, Theme, iced_wgpu::Renderer> for Icon {

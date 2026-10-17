@@ -51,7 +51,7 @@ pub const BACKGROUND: Color = rgb(0x10, 0x10, 0x10);
 
 /// The bundled family, named rather than left to `Family::SansSerif` — which
 /// cosmic-text resolves against the system database. Every widget the shell
-/// overlay builds takes it as [`iced_core::renderer::Settings::default_font`],
+/// overlay builds takes it as [`iced_core::renderer::Settings::font`],
 /// so it is the overlay's `Font::DEFAULT` in the only sense that governs what
 /// is drawn.
 pub const FONT: iced_core::Font = iced_core::Font::new("Noto Sans");
@@ -77,6 +77,10 @@ pub const TEXT: Color = Color {
 };
 
 impl iced_core::widget::text::Catalog for Theme {
+    fn selection(&self) -> Color {
+        ACCENT
+    }
+
     type Class<'a> = Option<Color>;
 
     fn default<'a>() -> Self::Class<'a> {
@@ -86,6 +90,7 @@ impl iced_core::widget::text::Catalog for Theme {
     fn style(&self, class: &Self::Class<'_>) -> iced_core::widget::text::Style {
         iced_core::widget::text::Style {
             color: Some(class.unwrap_or(TEXT)),
+            selection: None,
         }
     }
 }
@@ -201,6 +206,10 @@ impl iced_widget::button::Catalog for Theme {
 }
 
 impl iced_widget::checkbox::Catalog for Theme {
+    fn selection(&self) -> Color {
+        ACCENT
+    }
+
     type Class<'a> = ();
 
     fn default<'a>() -> Self::Class<'a> {}

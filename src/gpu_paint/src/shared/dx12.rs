@@ -190,6 +190,9 @@ impl Importer {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 },
+                // Shared resources cross D3D devices in COMMON, which the
+                // DX12 backend also uses for PRESENT.
+                wgpu::TextureUses::PRESENT,
             )
         };
         Ok(Imported {

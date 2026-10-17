@@ -122,6 +122,7 @@ impl Importer {
                     height,
                     depth: 1,
                 },
+                None,
             )
         };
         let texture = unsafe {
@@ -141,6 +142,8 @@ impl Importer {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 },
+                // IOSurface already contains CEF's pixels and is shader-readable.
+                wgpu::TextureUses::RESOURCE,
             )
         };
         self.cached = Some(Cached {

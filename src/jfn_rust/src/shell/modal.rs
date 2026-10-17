@@ -1,5 +1,6 @@
 //! The shell overlay's modal stack.
 
+use iced_core::Widget as _;
 use std::time::Instant;
 
 use iced_core::widget::Id;
@@ -187,9 +188,11 @@ impl Stack {
         screen: &'a Screen,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         match self.top() {
-            Some(View::Connect(connect)) => connect.view(screen).map(Message::Connect),
-            Some(View::SettingsOverlay(overlay)) => overlay.view().map(Message::SettingsOverlay),
-            None => iced_widget::space::horizontal().into(),
+            Some(View::Connect(connect)) => connect.view(screen)._map(Message::Connect)._boxed(),
+            Some(View::SettingsOverlay(overlay)) => {
+                overlay.view()._map(Message::SettingsOverlay)._boxed()
+            }
+            None => iced_widget::space::horizontal()._boxed(),
         }
     }
 

@@ -1,6 +1,7 @@
 //! The connect screen's spinner, ported from `overlay.css`'s `spin` keyframes:
 //! an 80-pixel ring, 6 pixels thick, one turn per second.
 
+use iced_core::Widget as _;
 use std::time::Instant;
 
 use iced_core::{Color, Element, Length, Point, Rectangle, Size, mouse};
@@ -33,7 +34,7 @@ impl Spinner {
         Canvas::new(self)
             .width(Length::Fixed(DIAMETER))
             .height(Length::Fixed(DIAMETER))
-            .into()
+            ._boxed()
     }
 }
 

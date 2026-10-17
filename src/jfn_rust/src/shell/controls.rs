@@ -1,6 +1,5 @@
 //! Keyboard focus and activation for Client Settings controls.
 
-use iced_core::Renderer as _;
 use iced_core::keyboard::{self, Key, key::Named};
 use iced_core::widget::operation::{Focusable, Scrollable};
 use iced_core::widget::{self, Id, Operation, Tree};
@@ -8,6 +7,7 @@ use iced_core::{
     Background, Element, Event, Layout, Length, Point, Rectangle, Shell, Size, Vector, layout,
     mouse, overlay, renderer,
 };
+use iced_core::{Renderer as _, Widget as _};
 use iced_widget::pick_list;
 
 use crate::shell::theme::{self, Theme};
@@ -83,21 +83,22 @@ struct Control<'a, Message> {
 /// or Space.
 pub fn action<'a, Message: Clone + 'a>(
     id: Id,
-    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+    content: impl iced_core::Widget<Message, Theme, Renderer> + 'a,
     message: Message,
 ) -> Element<'a, Message, Theme, Renderer> {
-    Element::new(Control {
+    Control {
         id,
-        content: content.into(),
+        content: content._boxed(),
         keyboard: Keyboard::Action(message),
-    })
+    }
+    ._boxed()
 }
 
 /// Makes a named tab keyboard-focusable and activatable with the same action
 /// semantics as the other shell controls.
 pub fn tab<'a, Message: Clone + 'a>(
     id: Id,
-    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+    content: impl iced_core::Widget<Message, Theme, Renderer> + 'a,
     message: Message,
 ) -> Element<'a, Message, Theme, Renderer> {
     action(id, content, message)
@@ -122,28 +123,29 @@ where
         .on_select(on_select)
         .padding(iced_core::Padding::from([8, 10]));
 
-    Element::new(Control {
+    Control {
         id,
-        content: content.into(),
+        content: content._boxed(),
         keyboard: Keyboard::Select {
             messages,
             selected: selected_index,
         },
-    })
+    }
+    ._boxed()
 }
 
 impl<Message: Clone> Control<'_, Message> {
     fn click_child(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
         let event = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let cursor = mouse::Cursor::Available(layout.bounds().center());
-        self.content.as_widget_mut().update(
+        self.content.update(
             &mut tree.children[0],
             &event,
             layout,
@@ -154,6 +156,8 @@ impl<Message: Clone> Control<'_, Message> {
         );
     }
 }
+
+impl<Message> widget::Meta for Control<'_, Message> {}
 
 impl<Message: Clone> widget::Widget<Message, Theme, Renderer> for Control<'_, Message> {
     fn tag(&self) -> widget::tree::Tag {
@@ -184,31 +188,25 @@ impl<Message: Clone> widget::Widget<Message, Theme, Renderer> for Control<'_, Me
     }
 
     fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
+        self.content.size()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+        self.content.layout(&mut tree.children[0], renderer, limits);
+        tree.size = tree.children[0].size;
     }
 
     fn update(
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
+        self.content.update(
             &mut tree.children[0],
             event,
             layout,
@@ -281,11 +279,11 @@ impl<Message: Clone> widget::Widget<Message, Theme, Renderer> for Control<'_, Me
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
+        self.content.draw(
             &tree.children[0],
             renderer,
             theme,
@@ -309,61 +307,61 @@ impl<Message: Clone> widget::Widget<Message, Theme, Renderer> for Control<'_, Me
     fn mouse_interaction(
         &self,
         tree: &Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0],
-            layout,
-            cursor,
-            viewport,
-            renderer,
-        )
+        self.content
+            .mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
     }
 
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
         let state = tree.state.downcast_mut::<State>();
         operation.focusable(Some(&self.id), layout.bounds(), &mut state.focus);
         self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+            .operate(&mut tree.children[0], layout, viewport, renderer, operation);
     }
 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'b>,
+        layout: Layout,
         renderer: &Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        let content = self.content.as_widget_mut().overlay(
+        window: Size,
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
+        let mut content = self.content.overlay(
             &mut tree.children[0],
             layout,
             renderer,
             viewport,
             translation,
-        )?;
+            window,
+        );
         let Keyboard::Select { messages, .. } = &self.keyboard else {
-            return Some(content);
+            return content;
         };
         let state = tree.state.downcast_mut::<State>();
         if !state.select_open || messages.is_empty() {
-            return Some(content);
+            return content;
         }
-        Some(overlay::Element::new(Box::new(SelectOverlay {
-            content,
-            state,
-            total: messages.len(),
-        })))
+        if let Some(menu) = content.pop() {
+            content.push(overlay::Element::new(Box::new(SelectOverlay {
+                content: menu,
+                state,
+                total: messages.len(),
+            })));
+        }
+        content
     }
 }
 
@@ -374,33 +372,25 @@ struct SelectOverlay<'a, Message> {
 }
 
 impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for SelectOverlay<'_, Message> {
-    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
-        self.content.as_overlay_mut().layout(renderer, bounds)
-    }
-
     fn draw(
         &self,
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
-        layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
         self.content
             .as_overlay()
-            .draw(renderer, theme, style, layout, cursor);
+            .draw(renderer, theme, style, cursor);
     }
 
-    fn operate(&mut self, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
-        self.content
-            .as_overlay_mut()
-            .operate(layout, renderer, operation);
+    fn operate(&mut self, renderer: &Renderer, operation: &mut dyn Operation) {
+        self.content.as_overlay_mut().operate(renderer, operation);
     }
 
     fn update(
         &mut self,
         event: &Event,
-        layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -409,7 +399,7 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for SelectOverla
             let was_captured = shell.is_event_captured();
             self.content
                 .as_overlay_mut()
-                .update(event, layout, cursor, renderer, shell);
+                .update(event, cursor, renderer, shell);
             self.state.close_on_newly_captured_left_press(
                 event,
                 was_captured,
@@ -419,14 +409,13 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for SelectOverla
         };
         if let Some(direction) = arrow(key) {
             self.state.highlight = moved_index(self.state.highlight, self.total, direction);
-            self.move_rendered_highlight(layout, renderer, shell);
+            self.move_rendered_highlight(renderer, shell);
             shell.capture_event();
         } else if activation(key) {
-            self.move_rendered_highlight(layout, renderer, shell);
-            if let Some(cursor) = highlight_cursor(layout, self.total, self.state.highlight) {
+            self.move_rendered_highlight(renderer, shell);
+            if let Some(cursor) = self.highlight_cursor(renderer) {
                 self.content.as_overlay_mut().update(
                     &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    layout,
                     cursor,
                     renderer,
                     shell,
@@ -438,27 +427,21 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for SelectOverla
         } else {
             self.content
                 .as_overlay_mut()
-                .update(event, layout, cursor, renderer, shell);
+                .update(event, cursor, renderer, shell);
         }
     }
 
-    fn mouse_interaction(
-        &self,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
+    fn mouse_interaction(&self, cursor: mouse::Cursor, renderer: &Renderer) -> mouse::Interaction {
         self.content
             .as_overlay()
-            .mouse_interaction(layout, cursor, renderer)
+            .mouse_interaction(cursor, renderer)
     }
 
     fn overlay<'a>(
         &'a mut self,
-        layout: Layout<'a>,
         renderer: &Renderer,
-    ) -> Option<overlay::Element<'a, Message, Theme, Renderer>> {
-        self.content.as_overlay_mut().overlay(layout, renderer)
+    ) -> Vec<overlay::Element<'a, Message, Theme, Renderer>> {
+        self.content.as_overlay_mut().overlay(renderer)
     }
 
     fn index(&self) -> f32 {
@@ -467,19 +450,13 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for SelectOverla
 }
 
 impl<Message: Clone> SelectOverlay<'_, Message> {
-    fn move_rendered_highlight(
-        &mut self,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        shell: &mut Shell<'_, Message>,
-    ) {
-        let Some(cursor) = highlight_cursor(layout, self.total, self.state.highlight) else {
+    fn move_rendered_highlight(&mut self, renderer: &Renderer, shell: &mut Shell<'_, Message>) {
+        let Some(cursor) = self.highlight_cursor(renderer) else {
             return;
         };
         let position = cursor.position().unwrap_or(Point::ORIGIN);
         self.content.as_overlay_mut().update(
             &Event::Mouse(mouse::Event::CursorMoved { position }),
-            layout,
             cursor,
             renderer,
             shell,
@@ -488,11 +465,36 @@ impl<Message: Clone> SelectOverlay<'_, Message> {
     }
 }
 
-fn highlight_cursor(layout: Layout<'_>, total: usize, highlight: usize) -> Option<mouse::Cursor> {
-    let content = layout.children().next()?.bounds();
-    Some(mouse::Cursor::Available(highlight_point(
-        content, total, highlight,
-    )))
+impl<Message: Clone> SelectOverlay<'_, Message> {
+    fn highlight_cursor(&mut self, renderer: &Renderer) -> Option<mouse::Cursor> {
+        let mut bounds = MenuBounds::default();
+        self.content.as_overlay_mut().operate(renderer, &mut bounds);
+        Some(mouse::Cursor::Available(highlight_point(
+            bounds.0?,
+            self.total,
+            self.state.highlight,
+        )))
+    }
+}
+
+#[derive(Default)]
+struct MenuBounds(Option<Rectangle>);
+
+impl Operation for MenuBounds {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&Id>,
+        bounds: Rectangle,
+        content: Size,
+        translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        self.0 = Some(Rectangle::new(bounds.position() - translation, content));
+    }
 }
 
 fn highlight_point(content: Rectangle, total: usize, highlight: usize) -> Point {
@@ -577,7 +579,7 @@ impl Operation<ScanResult> for Scan {
         &mut self,
         id: Option<&Id>,
         bounds: Rectangle,
-        _content_bounds: Rectangle,
+        _content_bounds: Size,
         _translation: Vector,
         _state: &mut dyn Scrollable,
     ) {
@@ -641,7 +643,7 @@ impl Operation for FocusAndReveal {
         &mut self,
         id: Option<&Id>,
         bounds: Rectangle,
-        content_bounds: Rectangle,
+        content_bounds: Size,
         translation: Vector,
         state: &mut dyn Scrollable,
     ) {
@@ -662,6 +664,7 @@ impl Operation for FocusAndReveal {
         if y != 0.0 {
             state.scroll_by(
                 widget::operation::scrollable::AbsoluteOffset { x: 0.0, y },
+                widget::operation::Animation::Instant,
                 bounds,
                 content_bounds,
             );
@@ -707,7 +710,7 @@ impl Operation for ScrollOffset {
         &mut self,
         id: Option<&Id>,
         _bounds: Rectangle,
-        _content_bounds: Rectangle,
+        _content_bounds: Size,
         translation: Vector,
         _state: &mut dyn Scrollable,
     ) {
@@ -741,16 +744,21 @@ impl Operation for RestoreScroll {
     fn scrollable(
         &mut self,
         id: Option<&Id>,
-        _bounds: Rectangle,
-        _content_bounds: Rectangle,
+        bounds: Rectangle,
+        content: Size,
         _translation: Vector,
         state: &mut dyn Scrollable,
     ) {
         if id == Some(&self.viewport) {
-            state.scroll_to(widget::operation::scrollable::AbsoluteOffset {
-                x: Some(self.offset.x),
-                y: Some(self.offset.y),
-            });
+            state.scroll_to(
+                widget::operation::scrollable::AbsoluteOffset {
+                    x: Some(self.offset.x),
+                    y: Some(self.offset.y),
+                },
+                widget::operation::Animation::Instant,
+                bounds,
+                content,
+            );
         }
     }
 }
@@ -893,6 +901,22 @@ mod tests {
     }
 
     #[test]
+    fn select_highlight_uses_the_menu_content_after_scrolling() {
+        let mut menu = MenuBounds::default();
+        let mut scroll = Scroll::default();
+        menu.scrollable(
+            None,
+            Rectangle::new(Point::new(10.0, 60.0), Size::new(90.0, 40.0)),
+            Size::new(90.0, 120.0),
+            Vector::new(0.0, 40.0),
+            &mut scroll,
+        );
+
+        let bounds = menu.0.expect("menu content bounds");
+        assert_eq!(highlight_point(bounds, 6, 2), Point::new(55.0, 70.0));
+    }
+
+    #[test]
     fn scan_unfocuses_before_the_returned_target_operation_focuses() {
         let ids = [Id::unique(), Id::unique()];
         let mut states = [Focus(true), Focus(false)];
@@ -958,12 +982,21 @@ mod tests {
     }
 
     impl Scrollable for Scroll {
-        fn snap_to(&mut self, _offset: widget::operation::scrollable::RelativeOffset<Option<f32>>) {
+        fn snap_to(
+            &mut self,
+            _offset: widget::operation::scrollable::RelativeOffset<Option<f32>>,
+            _animation: widget::operation::Animation,
+            _bounds: Rectangle,
+            _content: Size,
+        ) {
         }
 
         fn scroll_to(
             &mut self,
             offset: widget::operation::scrollable::AbsoluteOffset<Option<f32>>,
+            _animation: widget::operation::Animation,
+            _bounds: Rectangle,
+            _content: Size,
         ) {
             self.restored = Some(offset);
         }
@@ -971,8 +1004,9 @@ mod tests {
         fn scroll_by(
             &mut self,
             offset: widget::operation::scrollable::AbsoluteOffset,
+            _animation: widget::operation::Animation,
             _bounds: Rectangle,
-            _content_bounds: Rectangle,
+            _content_bounds: Size,
         ) {
             self.by = offset.y;
         }
@@ -995,7 +1029,7 @@ mod tests {
         operation.scrollable(
             Some(&viewport),
             bounds,
-            Rectangle::new(iced_core::Point::ORIGIN, Size::new(100.0, 100.0)),
+            Size::new(100.0, 100.0),
             Vector::ZERO,
             &mut scroll,
         );
@@ -1020,7 +1054,7 @@ mod tests {
         operation.scrollable(
             Some(&viewport),
             bounds,
-            Rectangle::new(Point::ORIGIN, Size::new(100.0, 100.0)),
+            Size::new(100.0, 100.0),
             Vector::new(0.0, 30.0),
             &mut scroll,
         );
@@ -1062,7 +1096,7 @@ mod tests {
         capture.scrollable(
             Some(&viewport),
             Rectangle::default(),
-            Rectangle::default(),
+            Size::ZERO,
             Vector::new(3.25, 91.5),
             &mut scroll,
         );
@@ -1076,7 +1110,7 @@ mod tests {
         restore.scrollable(
             Some(&viewport),
             Rectangle::default(),
-            Rectangle::default(),
+            Size::ZERO,
             Vector::ZERO,
             &mut scroll,
         );

@@ -290,14 +290,23 @@ unsafe fn import(
         usage: wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     };
-    let texture = unsafe { device.create_texture_from_hal::<vulkan::Api>(hal_texture, &desc) };
+    // The raw acquire barrier runs before wgpu samples this image and leaves
+    // it in SHADER_READ_ONLY_OPTIMAL. Track that state so wgpu does not emit
+    // an UNDEFINED transition that discards the producer's contents.
+    let texture = unsafe {
+        device.create_texture_from_hal::<vulkan::Api>(
+            hal_texture,
+            &desc,
+            wgpu::TextureUses::RESOURCE,
+        )
+    };
     Ok((texture, image.as_raw()))
 }
 
 /// Acquire an imported dmabuf image from the foreign producer queue into
 /// our graphics queue and the shader-read layout. Without this the GPU
 /// samples an image it does not own and faults (device lost). Must use the
-/// raw HAL encoding API only: wgpu 29 forbids mixing raw and normal wgpu
+/// raw HAL encoding API only: wgpu forbids mixing raw and normal wgpu
 /// commands in the same `CommandEncoder`.
 pub(crate) fn acquire_barrier(
     device: &wgpu::Device,
@@ -313,7 +322,9 @@ pub(crate) fn acquire_barrier(
     let barrier = vk::ImageMemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::empty())
         .dst_access_mask(vk::AccessFlags::SHADER_READ)
-        .old_layout(vk::ImageLayout::UNDEFINED)
+        // External dma-buf contents are preserved through the foreign
+        // queue-family ownership transfer from GENERAL.
+        .old_layout(vk::ImageLayout::GENERAL)
         .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
         .dst_queue_family_index(0)

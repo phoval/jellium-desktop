@@ -249,6 +249,7 @@ impl<'a> Surface<'a> {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: FORMAT,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: extent.0,
             height: extent.1,
             present_mode: present.mode(),
@@ -622,7 +623,7 @@ impl<'a> Surface<'a> {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         // The acquire barrier must precede the render pass, in its own
-        // command buffer: wgpu 29 forbids mixing raw HAL encoding
+        // command buffer: wgpu forbids mixing raw HAL encoding
         // (`as_hal_mut`) and normal wgpu encoding on one CommandEncoder.
         let gate = self.device.submit_gate.read();
         if let Some(image) = external_image {
@@ -681,7 +682,7 @@ impl<'a> Surface<'a> {
         // Run after the early-return present failures above, so the closure's
         // surface-state updates only latch on a frame that actually presents.
         on_present();
-        frame.present();
+        self.device.queue.present(frame);
         // SUBOPTIMAL: the presented frame was fine, but rebuild the swapchain so
         // the next acquire is fresh rather than repeatedly suboptimal.
         if suboptimal {

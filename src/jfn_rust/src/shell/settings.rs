@@ -1,5 +1,6 @@
 //! Native client settings modal.
 
+use iced_core::Widget as _;
 use iced_core::widget::Id;
 use iced_core::{Element, Length, Padding};
 use iced_widget::{button, checkbox, column, scrollable, text};
@@ -188,7 +189,7 @@ impl Settings {
                         .on_submit(Message::CommitAudioPassthrough)
                         .on_unfocus(Message::CommitAudioPassthrough)
                         .padding(Padding::from([8, 10]))
-                        .into(),
+                        ._boxed(),
                     "Comma-separated list of codecs to pass through to the audio device (e.g. ac3,eac3,dts-hd,truehd). Leave empty to disable.",
                 ),
                 self.toggle(
@@ -267,7 +268,7 @@ impl Settings {
                     .on_submit(Message::CommitDeviceName)
                     .on_unfocus(Message::CommitDeviceName)
                     .padding(Padding::from([8, 10]))
-                    .into(),
+                    ._boxed(),
                 "Identifies this machine to the server. Leave blank to use the system hostname.",
             ))
             .push(self.selection_with_notice(
@@ -308,7 +309,7 @@ impl Settings {
         scrollable(controls)
             .id(SETTINGS_SCROLL)
             .height(Length::Fill)
-            .into()
+            ._boxed()
     }
 
     /// The mode the Hardware Decoding control shows: the stored value itself,
@@ -449,11 +450,11 @@ impl Settings {
     fn group<'a>(
         &self,
         title: &'a str,
-        controls: iced_widget::Column<'a, Message, Theme, iced_wgpu::Renderer>,
+        controls: iced_widget::Column<Element<'a, Message, Theme, iced_wgpu::Renderer>>,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         column![text(title).size(20), controls.spacing(16)]
             .spacing(10)
-            .into()
+            ._boxed()
     }
 
     fn setting_with_notice<'a>(
@@ -469,9 +470,9 @@ impl Settings {
             text(help).size(13).class(Some(theme::MUTED)),
         ];
         if let Some(notice_text) = notice {
-            col = col.push(text(notice_text).size(13).class(Some(theme::LINK)));
+            col = col.push(text(notice_text).size(13).class(Some(theme::LINK))._boxed());
         }
-        col.spacing(5).into()
+        col.spacing(5)._boxed()
     }
 
     fn setting<'a>(
@@ -520,9 +521,9 @@ impl Settings {
             text(help).size(13).class(Some(theme::MUTED)),
         ];
         if let Some(notice_text) = notice {
-            col = col.push(text(notice_text).size(13).class(Some(theme::LINK)));
+            col = col.push(text(notice_text).size(13).class(Some(theme::LINK))._boxed());
         }
-        col.spacing(5).into()
+        col.spacing(5)._boxed()
     }
 
     fn toggle<'a>(
