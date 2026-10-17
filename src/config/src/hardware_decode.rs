@@ -67,8 +67,21 @@ impl serde::Serialize for Hwdec {
 
 impl<'de> serde::Deserialize<'de> for Hwdec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = <&str>::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
+        struct HwdecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HwdecVisitor {
+            type Value = Hwdec;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hardware-decode mode this OS offers")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                v.parse().map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(HwdecVisitor)
     }
 }
 

@@ -823,6 +823,16 @@ mod tests {
     }
 
     #[test]
+    fn hwdec_loads_and_round_trips() {
+        let data = loaded(r#"{"hwdec":"vulkan"}"#);
+        assert_eq!(data.hwdec.as_str(), "vulkan");
+        let saved = serde_json::to_string(&data.to_file()).expect("serializes");
+        assert!(saved.contains(r#""hwdec":"vulkan""#));
+        let reloaded = loaded(&saved);
+        assert_eq!(reloaded.hwdec.as_str(), "vulkan");
+    }
+
+    #[test]
     fn transparent_titlebar_false_round_trips_and_true_is_omitted() {
         let false_data = loaded(r#"{"transparentTitlebar":false}"#);
         assert!(!false_data.transparent_titlebar);
