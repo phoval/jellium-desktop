@@ -13,7 +13,7 @@ deps:
 
 [group('build')]
 [windows]
-build: deps
+build:
     & 'dev/windows/build.ps1'
 
 [group('run')]

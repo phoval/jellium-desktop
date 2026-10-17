@@ -39,13 +39,14 @@ Run these commands in PowerShell from the repository root:
 
 ```powershell
 mise install
+mise x -- just deps
 mise x -- just build
 mise x -- just run
 ```
 
 Mise installs CMake, just, Meson, and Ninja. The Windows configuration loads automatically and uses `C:\msvcup\msvc` by default; set `MSVCUP_ROOT` to the directory containing `autoenv` if your installation is elsewhere. Visual Studio users can build from a Developer PowerShell instead.
 
-`just build` runs dependency setup first: it initializes submodules, downloads CEF, and builds mpv with MSYS2. Setup installs MSYS2 at `C:\msys64` if needed and installs its required packages. Bindgen uses MSYS2's libclang with the MSVC target; the build script loads msvcup's header and library paths into the build environment.
+`just deps` initializes submodules, downloads CEF, and builds mpv with MSYS2. Run it once before building and again when native dependencies change. Setup installs MSYS2 at `C:\msys64` if needed and installs its required packages. Bindgen uses MSYS2's libclang with the MSVC target; the build script loads msvcup's header and library paths into the build environment.
 
 The runnable application is staged at `build\jellium-desktop.exe`. To run the checks used before committing:
 
