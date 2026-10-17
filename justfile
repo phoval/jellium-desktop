@@ -46,6 +46,11 @@ test: build
 test: build
     . 'dev/windows/env.ps1'; cargo test --manifest-path src/Cargo.toml --workspace
 
+# Run the web bridge and device profile regressions (requires Node.js)
+[group('test')]
+test-js:
+    node --test src/web/input-plugin.test.js src/web/tests/device-profile.test.cjs
+
 # Format workspace
 [group('lint')]
 fmt:
