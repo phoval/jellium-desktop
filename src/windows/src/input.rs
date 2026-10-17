@@ -23,7 +23,8 @@ use windows::Win32::UI::HiDpi::{
     GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW, SetFocus, VK_ADD, VK_BROWSER_BACK,
+    GetCapture, GetKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW, ReleaseCapture, SetCapture,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ADD, VK_BROWSER_BACK,
     VK_BROWSER_FORWARD, VK_CAPITAL, VK_CLEAR, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE,
     VK_DOWN, VK_END, VK_F4, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_MENU, VK_MULTIPLY, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3,
@@ -37,11 +38,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, KF_EXTENDED,
     LoadCursorW, MSG, PostMessageW, PostThreadMessageW, RegisterClassExW, SET_WINDOW_POS_FLAGS,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetWindowPos, TranslateMessage,
-    UnregisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APPCOMMAND, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
-    WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDBLCLK,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_CHILD, WS_VISIBLE, XBUTTON2,
+    UnregisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APPCOMMAND, WM_CANCELMODE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, WNDCLASSEXW, WS_CHILD, WS_VISIBLE, XBUTTON2,
 };
 use windows::core::{PCWSTR, w};
 
@@ -71,12 +73,16 @@ struct State {
     input_hwnd_raw: usize,
     thread_id: u32,
     cursor_type: i32,
+    pressed_buttons: u32,
+    tracking_leave: bool,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     input_hwnd_raw: 0,
     thread_id: 0,
     cursor_type: CursorShape::Pointer.as_raw(),
+    pressed_buttons: 0,
+    tracking_leave: false,
 });
 
 /// The input child window, or `None` before the input thread creates it and
@@ -292,6 +298,30 @@ fn is_button_down(msg: u32) -> bool {
     matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN)
 }
 
+fn button_mask(msg: u32) -> u32 {
+    match msg {
+        WM_LBUTTONDOWN | WM_LBUTTONUP => MK_LBUTTON.0,
+        WM_RBUTTONDOWN | WM_RBUTTONUP => MK_RBUTTON.0,
+        WM_MBUTTONDOWN | WM_MBUTTONUP => MK_MBUTTON.0,
+        _ => 0,
+    }
+}
+
+/// Capture can be stolen by a native menu or canceled on deactivation. End
+/// outstanding presses outside every widget so cancellation cannot click one.
+fn cancel_mouse_buttons() {
+    let pressed = std::mem::take(&mut STATE.lock().pressed_buttons);
+    for (mask, button) in [
+        (MK_LBUTTON.0, BTN_LEFT),
+        (MK_RBUTTON.0, BTN_RIGHT),
+        (MK_MBUTTON.0, BTN_MIDDLE),
+    ] {
+        if pressed & mask != 0 {
+            jfn_input_dispatch_mouse_button(button, 0, -1, -1, 0);
+        }
+    }
+}
+
 /// The pointer position in the space CEF's view was sized in, mapped through
 /// the extent `crate::window` last sampled. The identity before the first
 /// sample exists.
@@ -331,21 +361,55 @@ unsafe extern "system" fn input_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
 
         WM_MOUSEMOVE => {
+            if !STATE.lock().tracking_leave {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    ..Default::default()
+                };
+                STATE.lock().tracking_leave = unsafe { TrackMouseEvent(&mut tracking) }.is_ok();
+            }
             let p = view_point(get_x_lparam(lp), get_y_lparam(lp));
             jfn_input_dispatch_mouse_move(p.x, p.y, mouse_modifiers(wp), 0);
             return LRESULT(0);
         }
 
         WM_MOUSELEAVE => {
+            STATE.lock().tracking_leave = false;
             jfn_input_dispatch_mouse_move(-1, -1, mouse_modifiers(wp), 1);
+            return LRESULT(0);
+        }
+
+        WM_CAPTURECHANGED => {
+            cancel_mouse_buttons();
+            return LRESULT(0);
+        }
+
+        WM_CANCELMODE => {
+            cancel_mouse_buttons();
+            if unsafe { GetCapture() } == hwnd {
+                let _ = unsafe { ReleaseCapture() };
+            }
             return LRESULT(0);
         }
 
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP
         | WM_MBUTTONUP => {
             let down = is_button_down(msg);
+            {
+                let mut state = STATE.lock();
+                if down {
+                    state.pressed_buttons |= button_mask(msg);
+                } else {
+                    state.pressed_buttons &= !button_mask(msg);
+                }
+            }
             if down {
                 let _ = unsafe { SetFocus(Some(hwnd)) };
+                if unsafe { GetCapture() } != hwnd {
+                    unsafe { SetCapture(hwnd) };
+                }
             }
             let physical = PhysicalPoint {
                 x: get_x_lparam(lp),
@@ -362,6 +426,11 @@ unsafe extern "system" fn input_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 p.y,
                 mouse_modifiers(wp),
             );
+            // Keep capture while any button is held, and never release a
+            // different window's capture after a menu or window gesture.
+            if !down && STATE.lock().pressed_buttons == 0 && unsafe { GetCapture() } == hwnd {
+                let _ = unsafe { ReleaseCapture() };
+            }
             return LRESULT(0);
         }
 
@@ -593,4 +662,105 @@ pub(crate) fn jfn_input_windows_set_cursor(t: c_int) {
     }
     let hwnd = HWND(hwnd_raw as *mut _);
     let _ = unsafe { PostMessageW(Some(hwnd), WM_SETCURSOR, WPARAM(hwnd_raw), LPARAM(1)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW, SendMessageW};
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    fn test_window(class: PCWSTR) -> windows_core::Result<TestWindow> {
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .map(TestWindow)
+        }
+    }
+
+    fn send(hwnd: HWND, msg: u32, buttons: u32) {
+        unsafe { SendMessageW(hwnd, msg, Some(WPARAM(buttons as usize)), Some(LPARAM(0))) };
+    }
+
+    #[test]
+    fn native_capture_and_leave_lifecycle() -> windows_core::Result<()> {
+        let class = w!("JfnMouseInputTest");
+        let instance = unsafe { GetModuleHandleW(None) }?;
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(input_wndproc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            ..Default::default()
+        };
+        assert_ne!(unsafe { RegisterClassExW(&wc) }, 0);
+        {
+            // Hidden windows exercise real user32 capture without showing UI.
+            let window = test_window(class)?;
+            let other = test_window(w!("STATIC"))?;
+            let hwnd = window.0;
+            send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON.0);
+            assert_eq!(unsafe { GetCapture() }, hwnd);
+            send(hwnd, WM_RBUTTONDOWN, MK_LBUTTON.0 | MK_RBUTTON.0);
+            send(hwnd, WM_LBUTTONUP, MK_RBUTTON.0);
+            assert_eq!(unsafe { GetCapture() }, hwnd);
+            send(hwnd, WM_RBUTTONUP, 0);
+            assert!(unsafe { GetCapture() }.is_invalid());
+            assert_eq!(STATE.lock().pressed_buttons, 0);
+
+            send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON.0);
+            unsafe { SetCapture(other.0) };
+            assert_eq!(STATE.lock().pressed_buttons, 0);
+            send(hwnd, WM_LBUTTONUP, 0);
+            assert_eq!(unsafe { GetCapture() }, other.0);
+            unsafe { ReleaseCapture() }?;
+
+            send(hwnd, WM_MBUTTONDOWN, MK_MBUTTON.0);
+            send(hwnd, WM_CANCELMODE, 0);
+            assert!(unsafe { GetCapture() }.is_invalid());
+            assert_eq!(STATE.lock().pressed_buttons, 0);
+
+            for _ in 0..2 {
+                send(hwnd, WM_MOUSEMOVE, 0);
+                // The cursor is already outside this hidden, empty window:
+                // user32 posts the leave immediately, then cancels tracking.
+                let mut message = MSG::default();
+                assert!(
+                    unsafe {
+                        PeekMessageW(
+                            &mut message,
+                            Some(hwnd),
+                            WM_MOUSELEAVE,
+                            WM_MOUSELEAVE,
+                            PM_REMOVE,
+                        )
+                    }
+                    .as_bool()
+                );
+                unsafe { DispatchMessageW(&message) };
+                assert!(!STATE.lock().tracking_leave);
+            }
+        }
+        unsafe { UnregisterClassW(class, Some(instance.into())) }?;
+        Ok(())
+    }
 }
