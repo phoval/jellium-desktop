@@ -91,6 +91,10 @@ pub struct Settings {
     pub device_name_default: String,
     server_available: bool,
     decoration_options: Vec<Option<WindowDecorations>>,
+    initial_decorations: Option<WindowDecorations>,
+    initial_transparent_titlebar: bool,
+    initial_hide_scrollbar: bool,
+    initial_log_level: String,
 }
 
 impl Default for Settings {
@@ -114,6 +118,10 @@ impl Settings {
             device_name_default: jfn_config::default_device_name(),
             server_available: !jfn_config::server_url().is_empty(),
             decoration_options,
+            initial_decorations: jfn_config::configured_window_decorations(),
+            initial_transparent_titlebar: jfn_config::transparent_titlebar(),
+            initial_hide_scrollbar: jfn_config::hide_scrollbar(),
+            initial_log_level: jfn_config::log_level(),
         }
     }
 
@@ -144,9 +152,23 @@ impl Settings {
             }
         }
 
+        let restart_banner = if self.restart_pending() {
+            text("One or more changed settings require restarting the application to take effect.")
+                .size(13)
+                .class(Some(theme::LINK))
+        } else {
+            text("Settings marked with 'Requires restart' take effect after restarting the application.")
+                .size(13)
+                .class(Some(theme::MUTED))
+        };
+
+        let hwdec_restart_notice = self
+            .hwdec_restart_pending()
+            .then_some("Restart required for the selected hardware decoder to take effect.");
+
         let mut controls = column![
-            text("Changes take effect after restarting the application.").class(Some(theme::MUTED)),
-            self.group(SECTION_TITLES[0], column![self.selection(
+            restart_banner,
+            self.group(SECTION_TITLES[0], column![self.selection_with_notice(
                 "Hardware Decoding",
                 controls::select(
                     HARDWARE_DECODING_CONTROL,
@@ -155,7 +177,8 @@ impl Settings {
                     Clone::clone,
                     Message::HardwareDecodingChanged,
                 ),
-                "Hardware video decoding mode. Use \"auto\" for automatic detection or \"no\" to disable.",
+                "Hardware video decoding mode. Use \"auto\" for automatic detection or \"no\" to disable. Switching between Direct3D 11 and Vulkan/NVDEC requires restart.",
+                hwdec_restart_notice,
             )]),
             self.group(SECTION_TITLES[1], column![
                 self.setting(
@@ -193,7 +216,10 @@ impl Settings {
 
         let mut advanced = column![].spacing(16);
         if !self.decoration_options.is_empty() {
-            advanced = advanced.push(self.selection(
+            let dec_notice = (jfn_config::configured_window_decorations()
+                != self.initial_decorations)
+                .then_some("Restart required to apply window decoration changes.");
+            advanced = advanced.push(self.selection_with_notice(
                 "Window Decorations",
                 controls::select(
                     WINDOW_DECORATION_CONTROL,
@@ -202,27 +228,37 @@ impl Settings {
                     decoration_label,
                     Message::WindowDecorationsChanged,
                 ),
-                "How the window titlebar is drawn. Changing requires restart.",
+                "How the window titlebar is drawn. Requires restart.",
+                dec_notice,
             ));
         }
         if jfn_platform_abi::try_lease()
             .is_some_and(|lease| transparent_titlebar_visible(lease.platform().display()))
         {
-            advanced = advanced.push(self.toggle(
+            let trans_notice = (jfn_config::transparent_titlebar()
+                != self.initial_transparent_titlebar)
+                .then_some("Restart required to apply titlebar transparency.");
+            advanced = advanced.push(self.toggle_with_notice(
                 TRANSPARENT_TITLEBAR_CONTROL,
                 "Transparent Titlebar",
                 jfn_config::transparent_titlebar(),
                 Message::TransparentTitlebarChanged,
                 "Overlay traffic light buttons on the window content instead of a separate titlebar. Requires restart.",
+                trans_notice,
             ));
         }
+        let scroll_notice = (jfn_config::hide_scrollbar() != self.initial_hide_scrollbar)
+            .then_some("Restart required to update scrollbar visibility.");
+        let log_notice = (jfn_config::log_level() != self.initial_log_level)
+            .then_some("Restart required to apply new log level.");
         advanced = advanced
-            .push(self.toggle(
+            .push(self.toggle_with_notice(
                 HIDE_SCROLLBAR_CONTROL,
                 "Hide Scrollbar",
                 jfn_config::hide_scrollbar(),
                 Message::HideScrollbarChanged,
                 "Hide scrollbars throughout the app. Scrolling with the wheel, trackpad, and keyboard still works. Requires restart.",
+                scroll_notice,
             ))
             .push(self.setting(
                 "Device Name",
@@ -234,7 +270,7 @@ impl Settings {
                     .into(),
                 "Identifies this machine to the server. Leave blank to use the system hostname.",
             ))
-            .push(self.selection(
+            .push(self.selection_with_notice(
                 "Log Level",
                 controls::select(
                     LOG_LEVEL_CONTROL,
@@ -245,7 +281,8 @@ impl Settings {
                     |value: &String| log_level_label(value),
                     Message::LogLevelChanged,
                 ),
-                "Set the application log verbosity level.",
+                "Set the application log verbosity level. Requires restart.",
+                log_notice,
             ));
         controls = controls.push(self.group(SECTION_TITLES[3], advanced));
         if self.server_available {
@@ -381,6 +418,19 @@ impl Settings {
         Some(AUDIO_PASSTHROUGH_FIELD)
     }
 
+    pub fn hwdec_restart_pending(&self) -> bool {
+        jfn_mpv::boot::current_raw_handle().is_some()
+            && jfn_mpv::boot::boot_gpu_api().as_deref() != jfn_config::hwdec().gpu_api()
+    }
+
+    pub fn restart_pending(&self) -> bool {
+        self.hwdec_restart_pending()
+            || jfn_config::configured_window_decorations() != self.initial_decorations
+            || jfn_config::transparent_titlebar() != self.initial_transparent_titlebar
+            || jfn_config::hide_scrollbar() != self.initial_hide_scrollbar
+            || jfn_config::log_level() != self.initial_log_level
+    }
+
     #[cfg(test)]
     pub(crate) fn testing() -> Self {
         Self {
@@ -389,6 +439,10 @@ impl Settings {
             device_name_default: "host".to_owned(),
             server_available: false,
             decoration_options: Vec::new(),
+            initial_decorations: jfn_config::configured_window_decorations(),
+            initial_transparent_titlebar: jfn_config::transparent_titlebar(),
+            initial_hide_scrollbar: jfn_config::hide_scrollbar(),
+            initial_log_level: jfn_config::log_level(),
         }
     }
 
@@ -402,19 +456,41 @@ impl Settings {
             .into()
     }
 
+    fn setting_with_notice<'a>(
+        &self,
+        label: &'a str,
+        control: Element<'a, Message, Theme, iced_wgpu::Renderer>,
+        help: &'a str,
+        notice: Option<&'a str>,
+    ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
+        let mut col = column![
+            text(label),
+            control,
+            text(help).size(13).class(Some(theme::MUTED)),
+        ];
+        if let Some(notice_text) = notice {
+            col = col.push(text(notice_text).size(13).class(Some(theme::LINK)));
+        }
+        col.spacing(5).into()
+    }
+
     fn setting<'a>(
         &self,
         label: &'a str,
         control: Element<'a, Message, Theme, iced_wgpu::Renderer>,
         help: &'a str,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
-        column![
-            text(label),
-            control,
-            text(help).size(13).class(Some(theme::MUTED))
-        ]
-        .spacing(5)
-        .into()
+        self.setting_with_notice(label, control, help, None)
+    }
+
+    fn selection_with_notice<'a>(
+        &self,
+        label: &'a str,
+        control: Element<'a, Message, Theme, iced_wgpu::Renderer>,
+        help: &'a str,
+        notice: Option<&'a str>,
+    ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
+        self.setting_with_notice(label, control, help, notice)
     }
 
     fn selection<'a>(
@@ -423,7 +499,30 @@ impl Settings {
         control: Element<'a, Message, Theme, iced_wgpu::Renderer>,
         help: &'a str,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
-        self.setting(label, control, help)
+        self.selection_with_notice(label, control, help, None)
+    }
+
+    fn toggle_with_notice<'a>(
+        &self,
+        id: Id,
+        label: &'a str,
+        value: bool,
+        changed: impl Fn(bool) -> Message + Copy + 'a,
+        help: &'a str,
+        notice: Option<&'a str>,
+    ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
+        let mut col = column![
+            controls::action(
+                id,
+                checkbox(value).label(label).on_toggle(changed),
+                changed(!value),
+            ),
+            text(help).size(13).class(Some(theme::MUTED)),
+        ];
+        if let Some(notice_text) = notice {
+            col = col.push(text(notice_text).size(13).class(Some(theme::LINK)));
+        }
+        col.spacing(5).into()
     }
 
     fn toggle<'a>(
@@ -434,16 +533,7 @@ impl Settings {
         changed: impl Fn(bool) -> Message + Copy + 'a,
         help: &'a str,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
-        column![
-            controls::action(
-                id,
-                checkbox(value).label(label).on_toggle(changed),
-                changed(!value),
-            ),
-            text(help).size(13).class(Some(theme::MUTED)),
-        ]
-        .spacing(5)
-        .into()
+        self.toggle_with_notice(id, label, value, changed, help, None)
     }
 
     fn action<'a>(
@@ -674,5 +764,25 @@ mod tests {
         assert_eq!(TITLE, "Settings");
         assert_eq!(CLOSE_LABEL, "Close Settings");
         assert_eq!(Settings::testing().dismiss(), Outcome::Dismiss);
+    }
+
+    #[test]
+    fn restart_pending_tracks_restart_sensitive_settings() {
+        let mut settings = Settings::testing();
+        settings.initial_log_level = "info".to_owned();
+        jfn_config::set_log_level("info");
+        assert!(!settings.restart_pending());
+
+        jfn_config::set_log_level("debug");
+        assert!(settings.restart_pending());
+
+        jfn_config::set_log_level("info");
+        assert!(!settings.restart_pending());
+
+        settings.initial_hide_scrollbar = false;
+        jfn_config::set_hide_scrollbar(true);
+        assert!(settings.restart_pending());
+        jfn_config::set_hide_scrollbar(false);
+        assert!(!settings.restart_pending());
     }
 }

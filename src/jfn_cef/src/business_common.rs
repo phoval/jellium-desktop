@@ -61,6 +61,16 @@ pub(crate) fn apply_setting_value(_section: &str, key: &str, value: Option<&str>
                         hwdec.gpu_api().unwrap_or("auto"),
                     ),
                 );
+                if outcome == jfn_mpv::api::HwdecApply::RestartRequired {
+                    jfn_logging::log(
+                        jfn_logging::Category::Cef,
+                        jfn_logging::Level::Warn,
+                        &format!(
+                            "Hardware decoding mode '{}' requires restarting Jellium Desktop to switch GPU context",
+                            hwdec.as_str()
+                        ),
+                    );
+                }
             }
             Err(e) => jfn_logging::log(
                 jfn_logging::Category::Cef,
