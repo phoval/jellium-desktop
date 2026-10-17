@@ -14,12 +14,14 @@ use crate::paint_scheduler::PaintScheduler;
 use crate::state;
 use crate::v8_handler::NativeHandlerBuilder;
 
-// `app://` scheme options. Match CEF_SCHEME_OPTION_* from
-// include/internal/cef_types.h.
-const SCHEME_OPTION_STANDARD: i32 = 1 << 0;
-const SCHEME_OPTION_LOCAL: i32 = 1 << 1;
-const SCHEME_OPTION_SECURE: i32 = 1 << 4;
-const SCHEME_OPTION_CORS_ENABLED: i32 = 1 << 6;
+// Use the linked CEF SDK's scheme flags so their meanings cannot drift.
+const SCHEME_OPTION_STANDARD: i32 = sys::cef_scheme_options_t::CEF_SCHEME_OPTION_STANDARD as i32;
+const SCHEME_OPTION_LOCAL: i32 = sys::cef_scheme_options_t::CEF_SCHEME_OPTION_LOCAL as i32;
+const SCHEME_OPTION_SECURE: i32 = sys::cef_scheme_options_t::CEF_SCHEME_OPTION_SECURE as i32;
+const SCHEME_OPTION_CORS_ENABLED: i32 =
+    sys::cef_scheme_options_t::CEF_SCHEME_OPTION_CORS_ENABLED as i32;
+const SCHEME_OPTION_FETCH_ENABLED: i32 =
+    sys::cef_scheme_options_t::CEF_SCHEME_OPTION_FETCH_ENABLED as i32;
 
 // V8 property attribute. Equivalent to V8_PROPERTY_ATTRIBUTE_READONLY.
 fn readonly_attr() -> V8Propertyattribute {
@@ -176,7 +178,8 @@ wrap_app! {
                 SCHEME_OPTION_STANDARD
                     | SCHEME_OPTION_SECURE
                     | SCHEME_OPTION_LOCAL
-                    | SCHEME_OPTION_CORS_ENABLED,
+                    | SCHEME_OPTION_CORS_ENABLED
+                    | SCHEME_OPTION_FETCH_ENABLED,
             );
         }
 
