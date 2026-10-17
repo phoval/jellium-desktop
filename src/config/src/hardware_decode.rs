@@ -22,7 +22,7 @@ const CURRENT_OS: TargetOs = TargetOs::Macos;
 pub fn hwdec_options() -> &'static [&'static str] {
     match CURRENT_OS {
         TargetOs::Linux => &["auto", "no", "vaapi", "nvdec", "vulkan"],
-        TargetOs::Windows => &["auto", "no", "d3d11va", "nvdec", "vulkan"],
+        TargetOs::Windows => &["auto", "no", "d3d11va", "d3d12va", "nvdec", "vulkan"],
         TargetOs::Macos => &["auto", "no", "videotoolbox", "vulkan"],
     }
 }
@@ -40,16 +40,11 @@ impl Hwdec {
     /// The mpv `gpu-api` this mode's interop needs, when mpv's own GPU API
     /// probe would not pick it.
     ///
-    /// On Windows mpv probes `d3d11` before `vulkan`
-    /// (`third_party/mpv/video/out/gpu/context.c`), but `hwdec_vulkan.c`
-    /// only maps frames into a Vulkan context and `hwdec_cuda.c` only into a
-    /// Vulkan or OpenGL one. Left on `auto`, both modes silently fall back
-    /// to software decoding. Elsewhere Vulkan already probes first.
+    /// On Windows mpv uses Direct3D 11 as the default GPU context, which
+    /// integrates with DirectComposition and avoids crashing in vendor Vulkan
+    /// swapchain drivers.
     pub fn gpu_api(self) -> Option<&'static str> {
-        match (CURRENT_OS, self.0) {
-            (TargetOs::Windows, "vulkan" | "nvdec") => Some("vulkan"),
-            _ => None,
-        }
+        None
     }
 }
 
@@ -127,12 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn only_windows_vulkan_and_nvdec_pin_the_gpu_api() {
+    fn default_gpu_api_is_unpinned() {
         for option in hwdec_options() {
             let hwdec: Hwdec = option.parse().unwrap();
-            let expected =
-                (cfg!(windows) && matches!(*option, "vulkan" | "nvdec")).then_some("vulkan");
-            assert_eq!(hwdec.gpu_api(), expected, "{option}");
+            assert_eq!(hwdec.gpu_api(), None, "{option}");
         }
     }
 
