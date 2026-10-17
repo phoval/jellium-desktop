@@ -72,22 +72,93 @@ fn platform_switches(backend: DisplayBackend) -> Vec<state::PendingSwitch> {
                 .push(state::PendingSwitch::with_value("password-store", "basic"));
         }
         DisplayBackend::Windows => {
-            c.pending_switches
-                .push(state::PendingSwitch::with_value("use-angle", "d3d11"));
-            // The LUID is a Windows-only concept; the arm itself compiles
-            // everywhere because `DisplayBackend` does.
             #[cfg(windows)]
-            if let Some(luid) =
-                jfn_gpu_paint::surfaces().and_then(jfn_gpu_paint::Surfaces::adapter_luid)
             {
-                c.pending_switches.push(state::PendingSwitch::with_value(
-                    "use-adapter-luid",
-                    &format!("{},{}", luid >> 32, luid as u32),
-                ));
+                let luid =
+                    jfn_gpu_paint::surfaces().and_then(jfn_gpu_paint::Surfaces::adapter_luid);
+                c.pending_switches.extend(windows_switches_for_luid(luid));
+            }
+            #[cfg(not(windows))]
+            {
+                c.pending_switches
+                    .push(state::PendingSwitch::with_value("use-angle", "d3d11"));
             }
         }
     };
     c.pending_switches
+}
+
+#[cfg(windows)]
+fn windows_switches_for_luid(luid: Option<jfn_gpu_paint::ProducerId>) -> Vec<state::PendingSwitch> {
+    let mut switches = vec![state::PendingSwitch::with_value("use-angle", "d3d11")];
+    if let Some(luid) = luid {
+        switches.push(state::PendingSwitch::with_value(
+            "use-adapter-luid",
+            &jfn_gpu_paint::format_luid_switch(luid),
+        ));
+    }
+    switches
+}
+
+#[cfg(windows)]
+pub(crate) fn format_windows_cef_graphics_baseline(
+    adapter: Option<&jfn_gpu_paint::AdapterDiagnostics>,
+    disable_gpu_compositing: bool,
+) -> String {
+    let gpu_compositing = if disable_gpu_compositing {
+        "disabled (disable-gpu-compositing)"
+    } else {
+        "enabled"
+    };
+    let (overlay_summary, alignment_summary, shared_import_summary) = match adapter {
+        Some(diag) => {
+            let luid_switch = diag.adapter_luid.map(jfn_gpu_paint::format_luid_switch);
+            let alignment = match (&luid_switch, diag.producer_match.is_compatible()) {
+                (Some(luid), true) => format!("matched (use-adapter-luid={luid})"),
+                (Some(luid), false) => format!(
+                    "mismatch ({}; use-adapter-luid={luid})",
+                    diag.producer_match
+                ),
+                (None, _) => {
+                    "unpinned (overlay adapter LUID unavailable; adapter mismatch risk)".to_owned()
+                }
+            };
+            let shared_enabled =
+                !disable_gpu_compositing && diag.can_import_shared && diag.adapter_luid.is_some();
+            let shared = if shared_enabled {
+                "enabled".to_owned()
+            } else if disable_gpu_compositing {
+                "disabled (disable-gpu-compositing)".to_owned()
+            } else if !diag.can_import_shared {
+                format!(
+                    "disabled (overlay can_import_shared=false, producer_match={})",
+                    diag.producer_match
+                )
+            } else {
+                "disabled (unpinned producer adapter LUID)".to_owned()
+            };
+            let overlay = format!(
+                "\"{}\" (backend={:?}, type={:?}, vendor={:#06x}, device={:#06x}, luid={}, producer_match={}, can_import_shared={})",
+                diag.name,
+                diag.backend,
+                diag.device_type,
+                diag.vendor,
+                diag.device,
+                diag.luid_summary(),
+                diag.producer_match,
+                diag.can_import_shared,
+            );
+            (overlay, alignment, shared)
+        }
+        None => (
+            "uninitialized".to_owned(),
+            "unpinned (overlay D3D12 device not initialized; adapter mismatch risk)".to_owned(),
+            "disabled (overlay D3D12 device not initialized)".to_owned(),
+        ),
+    };
+    format!(
+        "Windows graphics baseline: [cef-angle] backend=d3d11 (use-angle=d3d11) gpu_compositing={gpu_compositing} adapter_alignment={alignment_summary}; [cef-shared-import] status={shared_import_summary}; [overlay-d3d12] adapter={overlay_summary}; note: [mpv-video-decode] d3d11va is separate from CEF/ANGLE and overlay D3D12, and Chromium negative frame-latency logs are separate observations unless paired with a [cef-shared-import] or [overlay-d3d12] failure"
+    )
 }
 
 /// Builds CefSettings and calls `CefInitialize` once for the browser owner.
@@ -99,6 +170,15 @@ pub(crate) fn jfn_cef_initialize(
     let mut pending_switches = platform_switches(platform.display());
     if options.disable_gpu_compositing {
         pending_switches.push(state::PendingSwitch::flag("disable-gpu-compositing"));
+    }
+    #[cfg(windows)]
+    if platform.display() == DisplayBackend::Windows {
+        let diag = jfn_gpu_paint::surfaces().map(jfn_gpu_paint::Surfaces::diagnostics);
+        jfn_logging::log(
+            jfn_logging::Category::Cef,
+            jfn_logging::Level::Info,
+            &format_windows_cef_graphics_baseline(diag, options.disable_gpu_compositing),
+        );
     }
     state::configure(state::Config { pending_switches });
 
@@ -245,4 +325,87 @@ fn fill_paths(settings: &mut Settings, platform: &dyn jfn_platform_abi::Platform
     set(&mut settings.framework_dir_path, paths.framework_dir_path);
     set(&mut settings.resources_dir_path, paths.resources_dir_path);
     set(&mut settings.locales_dir_path, paths.locales_dir_path);
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use jfn_gpu_paint::{AdapterDiagnostics, ProducerMatch, wgpu};
+
+    fn sample_adapter(
+        adapter_luid: Option<i64>,
+        producer_match: ProducerMatch,
+        can_import_shared: bool,
+    ) -> AdapterDiagnostics {
+        AdapterDiagnostics {
+            name: "NVIDIA GeForce RTX 4090".to_owned(),
+            backend: wgpu::Backend::Dx12,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            vendor: 0x10de,
+            device: 0x2684,
+            adapter_luid,
+            producer_match,
+            import_capable: true,
+            can_import_shared,
+        }
+    }
+
+    #[test]
+    fn windows_switches_keep_angle_d3d11_and_pin_luid_when_available() {
+        let luid = (2_i64 << 32) | 99;
+        assert_eq!(
+            windows_switches_for_luid(Some(luid)),
+            vec![
+                state::PendingSwitch::with_value("use-angle", "d3d11"),
+                state::PendingSwitch::with_value("use-adapter-luid", "2,99"),
+            ]
+        );
+        assert_eq!(
+            windows_switches_for_luid(None),
+            vec![state::PendingSwitch::with_value("use-angle", "d3d11")]
+        );
+    }
+
+    #[test]
+    fn windows_graphics_baseline_reports_matched_adapter_and_enabled_shared_import() {
+        let diag = sample_adapter(
+            Some((1_i64 << 32) | 0x1234),
+            ProducerMatch::Unconstrained,
+            true,
+        );
+        let report = format_windows_cef_graphics_baseline(Some(&diag), false);
+        assert!(report.contains("[cef-angle] backend=d3d11 (use-angle=d3d11)"));
+        assert!(report.contains("adapter_alignment=matched (use-adapter-luid=1,4660)"));
+        assert!(report.contains("[cef-shared-import] status=enabled"));
+        assert!(report.contains("[overlay-d3d12] adapter=\"NVIDIA GeForce RTX 4090\""));
+        assert!(report.contains("[mpv-video-decode] d3d11va is separate"));
+    }
+
+    #[test]
+    fn windows_graphics_baseline_reports_adapter_mismatch_and_disabled_shared_import() {
+        let diag = sample_adapter(
+            Some((1_i64 << 32) | 0x1234),
+            ProducerMatch::Mismatch {
+                requested: (1_i64 << 32) | 0x9999,
+            },
+            false,
+        );
+        let report = format_windows_cef_graphics_baseline(Some(&diag), false);
+        assert!(report.contains("adapter_alignment=mismatch"));
+        assert!(
+            report.contains("[cef-shared-import] status=disabled (overlay can_import_shared=false")
+        );
+    }
+
+    #[test]
+    fn windows_graphics_baseline_reports_disabled_gpu_compositing() {
+        let diag = sample_adapter(
+            Some((1_i64 << 32) | 0x1234),
+            ProducerMatch::Unconstrained,
+            true,
+        );
+        let report = format_windows_cef_graphics_baseline(Some(&diag), true);
+        assert!(report.contains("gpu_compositing=disabled (disable-gpu-compositing)"));
+        assert!(report.contains("[cef-shared-import] status=disabled (disable-gpu-compositing)"));
+    }
 }

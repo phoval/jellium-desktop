@@ -275,16 +275,50 @@ pub(crate) fn set_visibility(h: SurfaceHandle, visibility: Visibility) -> Visibi
     VisibilityCommit::issued(visibility, Ack::immediate())
 }
 
-/// The extent a frame's content asks the swapchain for, or `None` when the
-/// content carries nothing presentable.
-fn frame_extent(content: &Content<'_>) -> Option<FrameSize> {
+/// The extent a frame's content asks the swapchain for, or the diagnostic
+/// reason the content carries nothing presentable.
+fn frame_extent(content: &Content<'_>) -> Result<FrameSize, (&'static str, String)> {
     match content {
-        Content::Accelerated(tex) => (!tex.handle().is_null()).then(|| tex.coded()),
-        Content::Software { size, pixels, .. } => (!pixels.is_empty() && size.w > 0 && size.h > 0)
-            .then_some(FrameSize {
+        Content::Accelerated(tex) => {
+            if tex.handle().is_null() {
+                return Err((
+                    "[cef-shared-import]",
+                    format!(
+                        "null shared texture handle (coded={}x{})",
+                        tex.coded().w,
+                        tex.coded().h
+                    ),
+                ));
+            }
+            let coded = tex.coded();
+            if coded.w <= 0 || coded.h <= 0 {
+                return Err((
+                    "[cef-shared-import]",
+                    format!(
+                        "non-positive shared texture coded size {}x{}",
+                        coded.w, coded.h
+                    ),
+                ));
+            }
+            Ok(coded)
+        }
+        Content::Software { size, pixels, .. } => {
+            if pixels.is_empty() || size.w <= 0 || size.h <= 0 {
+                return Err((
+                    "[cef-angle]",
+                    format!(
+                        "unusable software frame (size={}x{}, bytes={})",
+                        size.w,
+                        size.h,
+                        pixels.len()
+                    ),
+                ));
+            }
+            Ok(FrameSize {
                 w: size.w,
                 h: size.h,
-            }),
+            })
+        }
     }
 }
 
@@ -298,27 +332,43 @@ pub(crate) fn present<'a>(
 ) -> Result<Presented, PaintFrame<'a>> {
     let mut st = STATE.lock();
     if st.devices.is_none() {
+        tracing::warn!(
+            target: "platform",
+            "[overlay-d3d12] frame rejected on surface {} ({part:?}): DirectComposition device not initialized",
+            h.id(),
+        );
         return Err(frame);
     }
-    let Some(size) = frame_extent(frame.content()) else {
-        return Err(frame);
+    let size = match frame_extent(frame.content()) {
+        Ok(size) => size,
+        Err((subsystem, reason)) => {
+            tracing::warn!(
+                target: "platform",
+                "{subsystem} frame rejected on surface {} ({part:?}): {reason}",
+                h.id(),
+            );
+            return Err(frame);
+        }
     };
     let (presented, needs_commit) = {
         let Some(entry) = st.find_mut(h) else {
             return Err(frame);
         };
         let layer = entry.layer_mut(part);
-        if !layer.ready(size) {
+        if !layer.ready(part, size) {
             return Err(frame);
         }
         let presented = match frame.content() {
-            Content::Accelerated(tex) => layer.present_shared(tex),
-            Content::Software { pixels, dirty, .. } => layer.present_pixels(Pixels {
-                size,
-                stride: size.w as u32 * 4,
-                bgra: pixels,
-                dirty,
-            }),
+            Content::Accelerated(tex) => layer.present_shared(part, tex),
+            Content::Software { pixels, dirty, .. } => layer.present_pixels(
+                part,
+                Pixels {
+                    size,
+                    stride: size.w as u32 * 4,
+                    bgra: pixels,
+                    dirty,
+                },
+            ),
         };
         (presented, layer.take_needs_commit())
     };
@@ -377,4 +427,59 @@ pub(crate) fn popup_hide(h: SurfaceHandle) {
     };
     entry.popup.detach();
     st.commit();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jfn_gpu_paint::SharedTexture;
+    use jfn_platform_abi::PhysicalSize;
+
+    #[test]
+    fn frame_extent_attributes_null_or_bad_shared_texture_to_cef_shared_import() {
+        let null_tex = SharedTexture::new(
+            std::ptr::null_mut(),
+            FrameSize { w: 1920, h: 1080 },
+            FrameSize { w: 1920, h: 1080 },
+        );
+        let err = frame_extent(&Content::Accelerated(null_tex)).err();
+        assert_eq!(
+            err.as_ref().map(|(sub, _)| *sub),
+            Some("[cef-shared-import]")
+        );
+        assert!(
+            err.as_ref()
+                .is_some_and(|(_, msg)| msg.contains("null shared texture handle"))
+        );
+
+        let zero_coded = SharedTexture::new(
+            std::ptr::dangling_mut::<std::ffi::c_void>(),
+            FrameSize { w: 0, h: 1080 },
+            FrameSize { w: 0, h: 1080 },
+        );
+        let err = frame_extent(&Content::Accelerated(zero_coded)).err();
+        assert_eq!(
+            err.as_ref().map(|(sub, _)| *sub),
+            Some("[cef-shared-import]")
+        );
+        assert!(
+            err.as_ref()
+                .is_some_and(|(_, msg)| msg.contains("non-positive shared texture coded size"))
+        );
+    }
+
+    #[test]
+    fn frame_extent_attributes_unusable_software_buffer_to_cef_angle() {
+        let err = frame_extent(&Content::Software {
+            size: PhysicalSize { w: 800, h: 600 },
+            pixels: &[],
+            dirty: &[],
+        })
+        .err();
+        assert_eq!(err.as_ref().map(|(sub, _)| *sub), Some("[cef-angle]"));
+        assert!(
+            err.as_ref()
+                .is_some_and(|(_, msg)| msg.contains("unusable software frame"))
+        );
+    }
 }

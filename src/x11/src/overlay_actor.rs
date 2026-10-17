@@ -387,7 +387,7 @@ fn present_gpu(
         Err(PresentFailed::Deferred(deferred)) => Gpu::Deferred(deferred.retry_at()),
         // The surface is fine and the producer owes the successor; nothing here
         // can conjure one, so this frame goes nowhere.
-        Err(e @ (PresentFailed::Import | PresentFailed::Kind)) => {
+        Err(e @ (PresentFailed::Import(_) | PresentFailed::Kind)) => {
             tracing::debug!("[x11] overlay actor frame not presented: {e}");
             owed_again()
         }

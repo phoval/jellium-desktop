@@ -22,6 +22,8 @@ pub use backend::ProducerId;
 #[cfg(windows)]
 pub(crate) use backend::adapter_luid;
 pub(crate) use backend::{Importer, acquire_barrier, adapter_matches, open_device};
+#[cfg(windows)]
+pub use backend::{format_luid_switch, unpack_luid};
 
 /// A shared-texture import that did not work.
 ///

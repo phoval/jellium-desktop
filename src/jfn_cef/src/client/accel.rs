@@ -66,9 +66,27 @@ pub(crate) fn acquire(info: &AcceleratedPaintInfo) -> Option<SharedTexture> {
 #[cfg(windows)]
 pub(crate) fn acquire(info: &AcceleratedPaintInfo) -> Option<SharedTexture> {
     if info.shared_texture_handle.is_null() {
+        jfn_logging::log(
+            jfn_logging::Category::Cef,
+            jfn_logging::Level::Warn,
+            &format!(
+                "[cef-shared-import] accelerated frame rejected: null shared_texture_handle (coded_size={}x{})",
+                info.extra.coded_size.width, info.extra.coded_size.height
+            ),
+        );
         return None;
     }
-    let (coded, visible_rect) = extents(info)?;
+    let Some((coded, visible_rect)) = extents(info) else {
+        jfn_logging::log(
+            jfn_logging::Category::Cef,
+            jfn_logging::Level::Warn,
+            &format!(
+                "[cef-shared-import] accelerated frame rejected: non-positive coded_size={}x{}",
+                info.extra.coded_size.width, info.extra.coded_size.height
+            ),
+        );
+        return None;
+    };
     Some(SharedTexture::new(
         info.shared_texture_handle,
         coded,

@@ -31,13 +31,15 @@ mod shared_texture;
 mod swapchain;
 mod types;
 
-pub use context::{FORMAT, Surfaces, any_adapter, surfaces};
+pub use context::{AdapterDiagnostics, FORMAT, ProducerMatch, Surfaces, any_adapter, surfaces};
 pub use error::SurfaceLost;
 pub use painter::{PresentFailed, Surface};
 pub use refresh::{
     RefreshRate, RefreshSource, current_refresh_rate, refresh_interval, report_refresh,
 };
 pub use shared::ProducerId;
+#[cfg(windows)]
+pub use shared::{format_luid_switch, unpack_luid};
 #[cfg(target_os = "linux")]
 pub use shared_texture::{DmabufFormat, DmabufPlane};
 pub use shared_texture::{FrameSize, SharedTexture};

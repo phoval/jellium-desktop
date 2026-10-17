@@ -1,7 +1,7 @@
 //! Process-lifetime state for the browser process. The configuration
 //! is published once before initialization; App handlers read the snapshot.
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingSwitch {
     pub name: String,
     pub value: Option<String>,

@@ -23,11 +23,9 @@ pub(crate) fn adapter_luid(adapter: &wgpu::Adapter) -> Option<ProducerId> {
 }
 
 pub(crate) fn adapter_matches(adapter: &wgpu::Adapter, want: ProducerId) -> bool {
-    let luid = unsafe { adapter.as_hal::<dx12::Api>() }
-        .and_then(|hal| unsafe { hal.raw_adapter().GetDesc1() }.ok())
-        .map(|desc| pack_luid(desc.AdapterLuid));
+    let luid = adapter_luid(adapter);
     tracing::info!(
-        "gpu_paint: candidate adapter LUID {luid:#018x?} (want {want:#018x})",
+        "gpu_paint [overlay-d3d12]: candidate adapter LUID {luid:#018x?} (want {want:#018x})",
         luid = luid,
     );
     luid == Some(want)
@@ -35,6 +33,18 @@ pub(crate) fn adapter_matches(adapter: &wgpu::Adapter, want: ProducerId) -> bool
 
 const fn pack_luid(luid: LUID) -> ProducerId {
     ((luid.HighPart as i64) << 32) | (luid.LowPart as i64)
+}
+
+/// Unpacks a packed [`ProducerId`] into `(HighPart, LowPart)` matching
+/// `LUID` and Chromium's `--use-adapter-luid=<high>,<low>` switch format.
+pub const fn unpack_luid(luid: ProducerId) -> (i32, u32) {
+    ((luid >> 32) as i32, luid as u32)
+}
+
+/// Formats a packed [`ProducerId`] for Chromium's `--use-adapter-luid` switch.
+pub fn format_luid_switch(luid: ProducerId) -> String {
+    let (high, low) = unpack_luid(luid);
+    format!("{high},{low}")
 }
 
 /// D3D12 can always open a shared handle; whether the *frame* opens is a
@@ -92,7 +102,13 @@ impl Importer {
                 .OpenSharedHandle(HANDLE(handle), &mut resource)
         }
         .map_err(|e| {
-            tracing::warn!("gpu_paint: OpenSharedHandle failed: {e:?}");
+            let coded = frame.coded();
+            tracing::warn!(
+                "gpu_paint [cef-shared-import]: D3D12 OpenSharedHandle failed (handle={handle:?}, coded={}x{}, hr={:#010x}): {e:?}",
+                coded.w,
+                coded.h,
+                e.code().0,
+            );
             ImportFailed("OpenSharedHandle")
         })?;
         let resource = resource.ok_or(ImportFailed("OpenSharedHandle returned null"))?;
@@ -101,7 +117,12 @@ impl Importer {
         // describes the frame, not necessarily this allocation.
         let desc = unsafe { resource.GetDesc() };
         let format = wgpu_format(desc.Format).ok_or_else(|| {
-            tracing::warn!("gpu_paint: shared texture format {:?}", desc.Format);
+            tracing::warn!(
+                "gpu_paint [cef-shared-import]: unsupported shared texture format {:?} (width={}, height={})",
+                desc.Format,
+                desc.Width,
+                desc.Height,
+            );
             ImportFailed("unsupported shared format")
         })?;
         let width = u32::try_from(desc.Width).map_err(|_| ImportFailed("resource too wide"))?;
@@ -155,4 +176,34 @@ pub(crate) fn acquire_barrier(
     _encoder: &mut wgpu::CommandEncoder,
     _image: u64,
 ) {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    #[test]
+    fn luid_roundtrips_high_and_low_parts_into_chromium_switch() {
+        let luid = LUID {
+            LowPart: 0x89ab_cdef,
+            HighPart: -42,
+        };
+        let packed = pack_luid(luid);
+        assert_eq!(unpack_luid(packed), (-42, 0x89ab_cdef));
+        assert_eq!(format_luid_switch(packed), "-42,2309737967");
+    }
+
+    #[test]
+    fn shared_texture_format_accepts_bgra8_and_rgba8_only() {
+        assert_eq!(
+            wgpu_format(DXGI_FORMAT_B8G8R8A8_UNORM),
+            Some(wgpu::TextureFormat::Bgra8Unorm)
+        );
+        assert_eq!(
+            wgpu_format(DXGI_FORMAT_R8G8B8A8_UNORM),
+            Some(wgpu::TextureFormat::Rgba8Unorm)
+        );
+        assert_eq!(wgpu_format(DXGI_FORMAT_R16G16B16A16_FLOAT), None);
+    }
 }

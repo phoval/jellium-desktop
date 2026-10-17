@@ -360,7 +360,9 @@ fn present_frame(
                 Ok(_presented) => {}
                 // The frame never entered the commit stream; CEF owes the
                 // successor, which is what a `None` return asks it for.
-                Err(PresentFailed::Deferred(_) | PresentFailed::Import | PresentFailed::Kind) => {
+                Err(
+                    PresentFailed::Deferred(_) | PresentFailed::Import(_) | PresentFailed::Kind,
+                ) => {
                     return None;
                 }
                 Err(e) => {

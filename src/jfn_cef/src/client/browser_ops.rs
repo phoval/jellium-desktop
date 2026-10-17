@@ -106,8 +106,10 @@ impl Inner {
         };
         jfn_logging::log(
             jfn_logging::Category::Cef,
-            jfn_logging::Level::Debug,
-            &format!("create browser windowless_frame_rate={fr} shared_textures={shared}"),
+            jfn_logging::Level::Info,
+            &format!(
+                "[cef-angle] create browser: shared_texture_import={shared} external_begin_frame={external_bf} windowless_frame_rate={fr}"
+            ),
         );
 
         let extra = crate::injection::build_web(shared);

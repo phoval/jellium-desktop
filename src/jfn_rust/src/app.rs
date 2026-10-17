@@ -1029,8 +1029,12 @@ fn run_app(
         return 1;
     };
     let mut resources = resources.with_mpv(mpv);
-    tracing::info!(target: "Main",
-        "[FLOW] mpv handle initialized in {} ms", mpv_started.elapsed().as_millis());
+    tracing::info!(
+        target: "Main",
+        "[FLOW] mpv handle initialized in {} ms ([mpv-video-decode] hwdec={}; mpv decode is independent of [cef-angle] and [overlay-d3d12])",
+        mpv_started.elapsed().as_millis(),
+        opts.hwdec.as_str(),
+    );
 
     if !jfn_playback::ingest_driver::jfn_playback_observe_mpv_properties(backend_byte) {
         tracing::error!(target: "Main", "observe_mpv_properties failed");

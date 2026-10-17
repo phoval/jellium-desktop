@@ -470,8 +470,8 @@ impl<'a> Surface<'a> {
         let imported = match self.importer.import(&self.ctx.device, frame) {
             Ok(imported) => imported,
             Err(e) => {
-                tracing::warn!("gpu_paint: {e}");
-                return Err(PresentFailed::Import);
+                tracing::warn!("gpu_paint [cef-shared-import]: {e}");
+                return Err(PresentFailed::Import(e.0));
             }
         };
         // A reused import is the importer's cached texture, so the bind group
@@ -664,8 +664,8 @@ pub enum PresentFailed {
     Deferred(Deferred),
     /// The shared frame could not be imported. The surface is fine, the last
     /// frame stays on screen, and the producer owes the successor.
-    #[error("shared frame import failed")]
-    Import,
+    #[error("shared frame import failed: {0}")]
+    Import(&'static str),
     /// A frame of the other kind reached a surface already latched to one. The
     /// producer owes the successor.
     #[error("frame kind changed on a live surface")]

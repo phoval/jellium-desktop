@@ -10,6 +10,63 @@ use crate::{FrameSize, ProducerId};
 /// The one swapchain format the process presents in, on every window system.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
+/// How the selected overlay GPU adapter relates to a producer adapter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProducerMatch {
+    /// No producer adapter was specified when opening the overlay device
+    /// (on Windows, the overlay D3D12 device opens first and pins CEF's
+    /// ANGLE producer to its LUID via `--use-adapter-luid`).
+    Unconstrained,
+    /// A specific producer adapter was requested and the selected adapter matches it.
+    Matched(ProducerId),
+    /// A specific producer adapter was requested, but no matching adapter was found;
+    /// fell back to the highest-ranked adapter (`can_import_shared` disabled).
+    Mismatch { requested: ProducerId },
+}
+
+impl ProducerMatch {
+    /// Whether this adapter selection is compatible with shared-texture import.
+    pub const fn is_compatible(&self) -> bool {
+        matches!(self, Self::Unconstrained | Self::Matched(_))
+    }
+}
+
+impl std::fmt::Display for ProducerMatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unconstrained => f.write_str("unconstrained (overlay selects adapter first)"),
+            Self::Matched(id) => write!(f, "matched({id:?})"),
+            Self::Mismatch { requested } => write!(f, "mismatch(requested={requested:?})"),
+        }
+    }
+}
+
+/// Diagnostic snapshot of the selected overlay GPU adapter and shared-texture capability.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AdapterDiagnostics {
+    pub name: String,
+    pub backend: wgpu::Backend,
+    pub device_type: wgpu::DeviceType,
+    pub vendor: u32,
+    pub device: u32,
+    #[cfg(windows)]
+    pub adapter_luid: Option<ProducerId>,
+    pub producer_match: ProducerMatch,
+    pub import_capable: bool,
+    pub can_import_shared: bool,
+}
+
+impl AdapterDiagnostics {
+    /// Formats the selected adapter's LUID for Windows diagnostic reports.
+    #[cfg(windows)]
+    pub fn luid_summary(&self) -> String {
+        match self.adapter_luid {
+            Some(luid) => format!("{} ({luid:#018x})", shared::format_luid_switch(luid)),
+            None => "unavailable".to_owned(),
+        }
+    }
+}
+
 /// The only handle to wgpu in the process. Held once; [`crate::Surface`]s
 /// borrow it.
 ///
@@ -35,6 +92,7 @@ pub struct Surfaces {
     // acquire fatally panics. Configure takes the write side, submit the read.
     pub(crate) submit_gate: parking_lot::RwLock<()>,
     can_import_shared: bool,
+    diagnostics: AdapterDiagnostics,
 }
 
 static INSTANCE: std::sync::OnceLock<Option<Surfaces>> = std::sync::OnceLock::new();
@@ -97,8 +155,14 @@ impl Surfaces {
         self.can_import_shared
     }
 
+    /// Diagnostic snapshot of the selected adapter and its producer alignment.
+    pub fn diagnostics(&self) -> &AdapterDiagnostics {
+        &self.diagnostics
+    }
+
     fn open(producer: Option<shared::ProducerId>) -> Result<Self, SurfaceLost> {
-        let (adapter, device_matched) = pick_adapter(producer).ok_or(Kind::NoAdapter)?;
+        let (adapter, producer_match) = pick_adapter(producer).ok_or(Kind::NoAdapter)?;
+        let device_matched = producer_match.is_compatible();
         let instance = enumerated().instance.clone();
         let info = adapter.get_info();
 
@@ -110,10 +174,10 @@ impl Surfaces {
         } = opened;
 
         device.set_device_lost_callback(|reason, msg| {
-            tracing::error!("gpu_paint: DEVICE LOST: {reason:?}: {msg}");
+            tracing::error!("gpu_paint [overlay-d3d12]: DEVICE LOST: {reason:?}: {msg}");
         });
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            tracing::error!("gpu_paint: wgpu error: {e}");
+            tracing::error!("gpu_paint [overlay-d3d12]: wgpu error: {e}");
         }));
 
         // Importing needs both halves: this device's import path must be live,
@@ -121,10 +185,34 @@ impl Surfaces {
         // different GPU fails at bind time.
         let can_import_shared = import_capable && device_matched;
 
+        let diagnostics = AdapterDiagnostics {
+            name: info.name.clone(),
+            backend: info.backend,
+            device_type: info.device_type,
+            vendor: info.vendor,
+            device: info.device,
+            #[cfg(windows)]
+            adapter_luid: shared::adapter_luid(&adapter),
+            producer_match,
+            import_capable,
+            can_import_shared,
+        };
+
+        #[cfg(windows)]
         tracing::info!(
-            "gpu_paint: device created on {} ({:?}), can_import_shared={can_import_shared} (device_matched={device_matched})",
-            info.name,
-            info.backend,
+            "gpu_paint [overlay-d3d12]: device created on \"{}\" (backend={:?}, type={:?}, vendor={:#06x}, device={:#06x}, luid={}), producer_match={producer_match}, can_import_shared={can_import_shared} (device_matched={device_matched})",
+            diagnostics.name,
+            diagnostics.backend,
+            diagnostics.device_type,
+            diagnostics.vendor,
+            diagnostics.device,
+            diagnostics.luid_summary(),
+        );
+        #[cfg(not(windows))]
+        tracing::info!(
+            "gpu_paint: device created on {} ({:?}), producer_match={producer_match}, can_import_shared={can_import_shared} (device_matched={device_matched})",
+            diagnostics.name,
+            diagnostics.backend,
         );
 
         let Pipelines {
@@ -148,6 +236,7 @@ impl Surfaces {
             pipeline_premultiplied,
             submit_gate: parking_lot::RwLock::new(()),
             can_import_shared,
+            diagnostics,
         })
     }
 
@@ -180,7 +269,7 @@ impl Surfaces {
     /// The LUID of the adapter this device was opened on, packed high:low.
     #[cfg(windows)]
     pub fn adapter_luid(&self) -> Option<ProducerId> {
-        shared::adapter_luid(&self.adapter)
+        self.diagnostics.adapter_luid
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -377,13 +466,13 @@ fn enumerated() -> &'static Enumerated {
 
 /// Pick an adapter, and report whether it is the one CEF produces on. A
 /// mismatch is not fatal — it only means shared import is unavailable.
-fn pick_adapter(producer: Option<shared::ProducerId>) -> Option<(wgpu::Adapter, bool)> {
+fn pick_adapter(producer: Option<shared::ProducerId>) -> Option<(wgpu::Adapter, ProducerMatch)> {
     let adapters = &enumerated().adapters;
 
     if let Some(want) = producer
         && let Some(found) = adapters.iter().find(|a| shared::adapter_matches(a, want))
     {
-        return Some((found.clone(), true));
+        return Some((found.clone(), ProducerMatch::Matched(want)));
     }
 
     let chosen = adapters
@@ -395,6 +484,61 @@ fn pick_adapter(producer: Option<shared::ProducerId>) -> Option<(wgpu::Adapter, 
             _ => 0,
         })?;
     // With no device to match against, the best adapter is as good as it gets
-    // and counts as matched; a device we asked for and missed does not.
-    Some((chosen.clone(), producer.is_none()))
+    // and counts as compatible; a device we asked for and missed does not.
+    let matched = match producer {
+        None => ProducerMatch::Unconstrained,
+        Some(requested) => ProducerMatch::Mismatch { requested },
+    };
+    Some((chosen.clone(), matched))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn producer_match_distinguishes_unconstrained_matched_and_mismatch() {
+        let unconstrained = ProducerMatch::Unconstrained;
+        assert!(unconstrained.is_compatible());
+        assert_eq!(
+            unconstrained.to_string(),
+            "unconstrained (overlay selects adapter first)"
+        );
+
+        #[cfg(windows)]
+        {
+            let matched = ProducerMatch::Matched(0x0000_0001_0000_1234);
+            assert!(matched.is_compatible());
+            assert!(matched.to_string().contains("matched("));
+
+            let mismatch = ProducerMatch::Mismatch {
+                requested: 0x0000_0001_0000_9999,
+            };
+            assert!(!mismatch.is_compatible());
+            assert!(mismatch.to_string().contains("mismatch(requested="));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn adapter_diagnostics_formats_luid_summary_when_present_or_absent() {
+        let with_luid = AdapterDiagnostics {
+            name: "Test GPU".to_owned(),
+            backend: wgpu::Backend::Dx12,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            vendor: 0x10de,
+            device: 0x2684,
+            adapter_luid: Some((1_i64 << 32) | 0x1234),
+            producer_match: ProducerMatch::Unconstrained,
+            import_capable: true,
+            can_import_shared: true,
+        };
+        assert_eq!(with_luid.luid_summary(), "1,4660 (0x0000000100001234)");
+
+        let without_luid = AdapterDiagnostics {
+            adapter_luid: None,
+            ..with_luid
+        };
+        assert_eq!(without_luid.luid_summary(), "unavailable");
+    }
 }

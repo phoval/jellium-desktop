@@ -44,6 +44,14 @@ impl Inner {
         h: i32,
     ) {
         let Some(pixels) = software_pixels(buffer, w, h) else {
+            jfn_logging::log(
+                jfn_logging::Category::Cef,
+                jfn_logging::Level::Warn,
+                &format!(
+                    "[cef-angle] software OnPaint frame rejected (is_popup={is_popup}): buffer_null={} size={w}x{h}",
+                    buffer.is_null()
+                ),
+            );
             return;
         };
         let size = PhysicalSize { w, h };
