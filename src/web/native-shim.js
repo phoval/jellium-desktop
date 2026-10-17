@@ -82,6 +82,7 @@
         mode: 'desktop',
         userAgent: navigator.userAgent,
         scriptPath: '',
+        supportedVideoCodecs: [],
         sections: [
             { key: 'playback', order: 0 },
             { key: 'audio', order: 1 },
@@ -99,7 +100,8 @@
                 audioChannels: _savedSettings.audioChannels || ''
             },
             transcode: {
-                forceTranscoding: !!_savedSettings.forceTranscoding
+                forceTranscoding: !!_savedSettings.forceTranscoding,
+                disabledVideoCodecs: _savedSettings.disabledVideoCodecs || []
             },
             advanced: {
                 transparentTitlebar: _savedSettings.transparentTitlebar !== false,
@@ -124,7 +126,8 @@
                 ]}
             ],
             transcode: [
-                { key: 'forceTranscoding', displayName: 'Force Transcoding', help: 'Always request a transcoded stream from the server, even when direct play would work.' }
+                { key: 'forceTranscoding', displayName: 'Force Transcoding', help: 'Always request a transcoded stream from the server, even when direct play would work.' },
+                { key: 'disabledVideoCodecs', displayName: 'Disabled Video Codecs', help: 'Selected codecs will be transcoded by the server instead of played directly.', inputType: 'disabledCodecList', codecListSource: 'supportedVideoCodecs' }
             ],
             advanced: [
                 { key: 'hideScrollbar', displayName: 'Hide Scrollbar', help: 'Hide scrollbars throughout the app. Scrolling with the wheel, trackpad, and keyboard still works. Requires restart.' },
@@ -392,12 +395,56 @@
         }
     };
 
-    // Device profile for direct play. Built in C++ at startup from mpv's
+    // Device profile for direct play. Built in Rust at startup from mpv's
     // actual decoder/demuxer/protocol support and injected here as a JSON
     // literal (JSON is a subset of JS object syntax, so no parse needed).
     const _deviceProfile = __DEVICE_PROFILE_JSON__;
-    function getDeviceProfile() {
-        return _deviceProfile;
+    const detectedVideoCodecs = new Set(
+        _deviceProfile.DirectPlayProfiles
+            .filter((profile) => profile.Type === 'Video')
+            .flatMap((profile) => (profile.VideoCodec || '').split(','))
+            .map((codec) => codec.trim().toLowerCase())
+            .filter(Boolean)
+    );
+    window.jmpInfo.supportedVideoCodecs = ['hevc', 'av1', 'vp9']
+        .filter((codec) => detectedVideoCodecs.has(codec));
+
+    function filterCodecCsv(codecs, disabledCodecs) {
+        return codecs
+            .split(',')
+            .filter((codec) => !disabledCodecs.has(codec.trim().toLowerCase()))
+            .join(',');
+    }
+
+    function filterVideoProfiles(profiles, disabledCodecs) {
+        return profiles.flatMap((profile) => {
+            if (profile.Type !== 'Video') return [profile];
+            const codecs = filterCodecCsv(profile.VideoCodec || '', disabledCodecs);
+            // An empty codec restriction can mean "any codec" to the server.
+            return codecs ? [{ ...profile, VideoCodec: codecs }] : [];
+        });
+    }
+
+    function buildEffectiveDeviceProfile() {
+        const settings = window.jmpInfo.settings.transcode;
+        const disabledCodecs = new Set(
+            settings.disabledVideoCodecs.map((codec) => codec.trim().toLowerCase())
+        );
+
+        return {
+            ..._deviceProfile,
+            DirectPlayProfiles: settings.forceTranscoding
+                ? _deviceProfile.DirectPlayProfiles.filter((profile) => profile.Type === 'Photo')
+                : filterVideoProfiles(_deviceProfile.DirectPlayProfiles, disabledCodecs),
+            TranscodingProfiles: filterVideoProfiles(
+                // Preserve the TS-only video target used by the native
+                // profile builder when forced transcoding is enabled.
+                _deviceProfile.TranscodingProfiles.filter((profile) => (
+                    !settings.forceTranscoding || profile.Type !== 'Video' || profile.Container !== 'mp4'
+                )),
+                disabledCodecs
+            )
+        };
     }
 
     window.NativeShell.AppHost = {
@@ -420,8 +467,8 @@
             ];
             return features.includes(command.toLowerCase());
         },
-        getDeviceProfile,
-        getSyncProfile: getDeviceProfile,
+        getDeviceProfile: buildEffectiveDeviceProfile,
+        getSyncProfile: buildEffectiveDeviceProfile,
         appName() { return 'Jellium Desktop'; },
         appVersion() { return jmpInfo.version; },
         deviceName() { return jmpInfo.deviceName; },

@@ -60,6 +60,7 @@ struct SettingsData {
     disable_gpu_compositing: bool,
     transparent_titlebar: bool,
     force_transcoding: bool,
+    disabled_video_codecs: Vec<String>,
     window_decorations: Option<WindowDecorations>,
     hide_scrollbar: bool,
 }
@@ -78,6 +79,7 @@ impl Default for SettingsData {
             disable_gpu_compositing: false,
             transparent_titlebar: true,
             force_transcoding: false,
+            disabled_video_codecs: Vec::new(),
             window_decorations: None,
             hide_scrollbar: true,
         }
@@ -136,6 +138,9 @@ struct SettingsFile {
 
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     force_transcoding: Option<bool>,
+
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    disabled_video_codecs: Option<Vec<Value>>,
 
     #[serde(
         deserialize_with = "lenient_decorations",
@@ -214,6 +219,8 @@ struct CliSettings<'a> {
 
     force_transcoding: bool,
 
+    disabled_video_codecs: &'a [String],
+
     hide_scrollbar: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +285,10 @@ impl SettingsData {
         if let Some(v) = file.force_transcoding {
             self.force_transcoding = v;
         }
+        if let Some(codecs) = file.disabled_video_codecs {
+            self.disabled_video_codecs =
+                normalize_video_codecs(codecs.iter().filter_map(Value::as_str).map(str::to_string));
+        }
         if let Some(v) = file.window_decorations {
             self.window_decorations = Some(v);
         }
@@ -308,6 +319,13 @@ impl SettingsData {
             transparent_titlebar: (!self.transparent_titlebar).then_some(false),
             log_level: (!self.log_level.is_empty()).then(|| self.log_level.clone()),
             force_transcoding: self.force_transcoding.then_some(true),
+            disabled_video_codecs: (!self.disabled_video_codecs.is_empty()).then(|| {
+                self.disabled_video_codecs
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect()
+            }),
             window_decorations: self.window_decorations,
             hide_scrollbar: (!self.hide_scrollbar).then_some(false),
             device_name: (!self.device_name.is_empty()).then(|| self.device_name.clone()),
@@ -326,6 +344,7 @@ impl SettingsData {
             transparent_titlebar: (!self.transparent_titlebar).then_some(false),
             log_level: (!self.log_level.is_empty()).then_some(self.log_level.as_str()),
             force_transcoding: self.force_transcoding,
+            disabled_video_codecs: &self.disabled_video_codecs,
             hide_scrollbar: self.hide_scrollbar,
             device_name: (!self.device_name.is_empty()).then_some(self.device_name.as_str()),
             device_name_default: default_device_name(),
@@ -572,6 +591,17 @@ bool_accessors!(
     transparent_titlebar
 );
 bool_accessors!(force_transcoding, set_force_transcoding, force_transcoding);
+
+/// Codecs excluded from direct play and transcoding output.
+pub fn disabled_video_codecs() -> Vec<String> {
+    state().lock().data.disabled_video_codecs.clone()
+}
+
+/// Setter for the list of disabled video codecs. Normalizes the input list.
+pub fn set_disabled_video_codecs(codecs: Vec<String>) {
+    state().lock().data.disabled_video_codecs = normalize_video_codecs(codecs);
+}
+
 /// The user's explicit decoration choice, unresolved; `None` when unset.
 pub fn configured_window_decorations() -> Option<WindowDecorations> {
     state().lock().data.window_decorations
@@ -640,6 +670,17 @@ fn normalize_device_name(raw: &str, platform_default: &str) -> String {
     trimmed
 }
 
+fn normalize_video_codecs(codecs: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for codec in codecs {
+        let codec = codec.trim().to_ascii_lowercase();
+        if !codec.is_empty() && !normalized.contains(&codec) {
+            normalized.push(codec);
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -689,6 +730,26 @@ mod tests {
     }
 
     #[test]
+    fn disabled_video_codecs_round_trip() {
+        let data = loaded(r#"{"disabledVideoCodecs":[" HEVC ","av1","hevc","",7,null]}"#);
+        let saved = serde_json::to_value(data.to_file()).expect("serializes");
+        assert_eq!(
+            saved["disabledVideoCodecs"],
+            serde_json::json!(["hevc", "av1"])
+        );
+        let cli: serde_json::Value =
+            serde_json::from_str(&data.cli_json()).expect("valid cli json");
+        assert_eq!(cli["disabledVideoCodecs"], saved["disabledVideoCodecs"]);
+        let reloaded = loaded(&saved.to_string());
+        assert_eq!(reloaded.disabled_video_codecs, data.disabled_video_codecs);
+        assert!(
+            loaded(r#"{"disabledVideoCodecs":7}"#)
+                .disabled_video_codecs
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn default_settings_write_only_server_url_and_maximized() {
         let text = serde_json::to_string(&SettingsData::default().to_file()).expect("serializes");
         assert_eq!(text, r#"{"serverUrl":"","windowMaximized":false}"#);
@@ -716,6 +777,7 @@ mod tests {
             disable_gpu_compositing: true,
             transparent_titlebar: false,
             force_transcoding: true,
+            disabled_video_codecs: vec!["hevc".into()],
             window_decorations: Some(WindowDecorations::ServerThemed),
             hide_scrollbar: false,
         };
@@ -739,6 +801,7 @@ mod tests {
                 "transparentTitlebar",
                 "logLevel",
                 "forceTranscoding",
+                "disabledVideoCodecs",
                 "windowDecorations",
                 "hideScrollbar",
                 "deviceName",
@@ -811,6 +874,7 @@ mod tests {
                 "hwdec",
                 "transparentTitlebar",
                 "forceTranscoding",
+                "disabledVideoCodecs",
                 "hideScrollbar",
                 "deviceName",
                 "deviceNameDefault",

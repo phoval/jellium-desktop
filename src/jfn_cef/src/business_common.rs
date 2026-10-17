@@ -63,6 +63,14 @@ pub(crate) fn apply_setting_value(_section: &str, key: &str, value: Option<&str>
         "hideScrollbar" => jfn_config::set_hide_scrollbar(value == "true"),
         "logLevel" => jfn_config::set_log_level(value),
         "forceTranscoding" => jfn_config::set_force_transcoding(value == "true"),
+        "disabledVideoCodecs" => match serde_json::from_str::<Vec<String>>(value) {
+            Ok(codecs) => jfn_config::set_disabled_video_codecs(codecs),
+            Err(e) => jfn_logging::log(
+                jfn_logging::Category::Cef,
+                jfn_logging::Level::Warn,
+                &format!("Ignoring setting {_section}.{key}: {e}"),
+            ),
+        },
         "deviceName" => {
             jfn_config::set_device_name(value, &jfn_config::default_device_name());
         }

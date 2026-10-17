@@ -4,6 +4,7 @@ use iced_core::widget::Id;
 use iced_core::{Element, Length, Padding};
 use iced_widget::{button, checkbox, column, scrollable, text};
 use jfn_platform_abi::{DisplayBackend, WindowDecorations};
+use std::sync::OnceLock;
 
 use crate::shell::controls;
 use crate::shell::theme::{self, Theme};
@@ -15,6 +16,29 @@ pub const AUDIO_PASSTHROUGH_FIELD: Id = Id::new("shell-settings-audio-passthroug
 pub const EXCLUSIVE_AUDIO_CONTROL: Id = Id::new("shell-settings-exclusive-audio");
 pub const CHANNEL_LAYOUT_CONTROL: Id = Id::new("shell-settings-channel-layout");
 pub const FORCE_TRANSCODE_CONTROL: Id = Id::new("shell-settings-force-transcode");
+const CODEC_CONTROLS: [(&str, &str, Id); 3] = [
+    (
+        "hevc",
+        "Disable HEVC Direct Play",
+        Id::new("shell-settings-disable-hevc"),
+    ),
+    (
+        "av1",
+        "Disable AV1 Direct Play",
+        Id::new("shell-settings-disable-av1"),
+    ),
+    (
+        "vp9",
+        "Disable VP9 Direct Play",
+        Id::new("shell-settings-disable-vp9"),
+    ),
+];
+static SUPPORTED_VIDEO_CODECS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Decoder names reported by mpv at startup, before the settings overlay opens.
+pub(crate) fn set_supported_video_codecs<'a>(codecs: impl Iterator<Item = &'a str>) {
+    SUPPORTED_VIDEO_CODECS.get_or_init(|| codecs.map(str::to_owned).collect());
+}
 pub const WINDOW_DECORATION_CONTROL: Id = Id::new("shell-settings-window-decoration");
 pub const TRANSPARENT_TITLEBAR_CONTROL: Id = Id::new("shell-settings-transparent-titlebar");
 pub const HIDE_SCROLLBAR_CONTROL: Id = Id::new("shell-settings-hide-scrollbar");
@@ -43,6 +67,7 @@ pub enum Message {
     ExclusiveAudioOutputChanged(bool),
     AudioChannelLayoutChanged(String),
     ForceTranscodingChanged(bool),
+    VideoCodecDisabled(String, bool),
     WindowDecorationsChanged(Option<WindowDecorations>),
     TransparentTitlebarChanged(bool),
     HideScrollbarChanged(bool),
@@ -96,6 +121,28 @@ impl Settings {
         let hwdec_selected = Self::selected_hwdec(jfn_config::hwdec());
         let audio_channels = jfn_config::audio_channels();
         let log_level = jfn_config::log_level();
+        let disabled_codecs = jfn_config::disabled_video_codecs();
+        let mut transcode = column![self.toggle(
+            FORCE_TRANSCODE_CONTROL,
+            "Force Transcoding",
+            jfn_config::force_transcoding(),
+            Message::ForceTranscodingChanged,
+            "Always request a transcoded stream from the server, even when direct play would work.",
+        )];
+        for (codec, label, id) in CODEC_CONTROLS {
+            if SUPPORTED_VIDEO_CODECS
+                .get()
+                .is_some_and(|codecs| codecs.iter().any(|name| name == codec))
+            {
+                transcode = transcode.push(self.toggle(
+                    id,
+                    label,
+                    disabled_codecs.iter().any(|name| name == codec),
+                    move |disabled| Message::VideoCodecDisabled(codec.to_owned(), disabled),
+                    "Transcode this codec on the server instead of playing it directly.",
+                ));
+            }
+        }
 
         let mut controls = column![
             text("Changes take effect after restarting the application.").class(Some(theme::MUTED)),
@@ -140,13 +187,7 @@ impl Settings {
                     "Force a specific channel layout. Leave empty for auto-detection.",
                 ),
             ]),
-            self.group(SECTION_TITLES[2], column![self.toggle(
-                FORCE_TRANSCODE_CONTROL,
-                "Force Transcoding",
-                jfn_config::force_transcoding(),
-                Message::ForceTranscodingChanged,
-                "Always request a transcoded stream from the server, even when direct play would work.",
-            )]),
+            self.group(SECTION_TITLES[2], transcode),
         ]
         .spacing(22);
 
@@ -285,6 +326,15 @@ impl Settings {
             Message::ExclusiveAudioOutputChanged(value) => jfn_config::set_audio_exclusive(value),
             Message::AudioChannelLayoutChanged(value) => jfn_config::set_audio_channels(&value),
             Message::ForceTranscodingChanged(value) => jfn_config::set_force_transcoding(value),
+            Message::VideoCodecDisabled(codec, disabled) => {
+                let mut codecs = jfn_config::disabled_video_codecs();
+                if disabled {
+                    codecs.push(codec);
+                } else {
+                    codecs.retain(|name| name != &codec);
+                }
+                jfn_config::set_disabled_video_codecs(codecs);
+            }
             Message::WindowDecorationsChanged(value) => {
                 jfn_config::set_window_decorations(value.map(WindowDecorations::as_str));
             }
@@ -373,7 +423,7 @@ impl Settings {
         id: Id,
         label: &'a str,
         value: bool,
-        changed: fn(bool) -> Message,
+        changed: impl Fn(bool) -> Message + Copy + 'a,
         help: &'a str,
     ) -> Element<'a, Message, Theme, iced_wgpu::Renderer> {
         column![

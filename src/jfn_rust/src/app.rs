@@ -328,13 +328,18 @@ fn publish_device_profile(mpv_raw: *mut jfn_mpv::sys::mpv_handle) {
             },
         })
         .collect();
-    let force = jfn_config::force_transcoding();
+    crate::shell::settings::set_supported_video_codecs(decoders.iter().filter_map(|codec| {
+        matches!(codec.kind, jfn_jellyfin::MediaKind::Video).then_some(codec.name.as_str())
+    }));
+    // Keep the injected base profile complete so the settings UI can show
+    // every decoder supported by this device. Force transcoding and per-codec
+    // exclusions are applied dynamically by native-shim.js.
     let profile = jfn_jellyfin::build_device_profile(
         &decoders,
         &caps.demuxers,
         "Jellium Desktop",
         APP_VERSION_FULL,
-        force,
+        false,
     );
     tracing::info!(target: "Main", "Device profile: {profile}");
     unsafe {
