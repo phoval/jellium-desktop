@@ -36,6 +36,21 @@ impl Hwdec {
     pub fn as_str(self) -> &'static str {
         self.0
     }
+
+    /// The mpv `gpu-api` this mode's interop needs, when mpv's own GPU API
+    /// probe would not pick it.
+    ///
+    /// On Windows mpv probes `d3d11` before `vulkan`
+    /// (`third_party/mpv/video/out/gpu/context.c`), but `hwdec_vulkan.c`
+    /// only maps frames into a Vulkan context and `hwdec_cuda.c` only into a
+    /// Vulkan or OpenGL one. Left on `auto`, both modes silently fall back
+    /// to software decoding. Elsewhere Vulkan already probes first.
+    pub fn gpu_api(self) -> Option<&'static str> {
+        match (CURRENT_OS, self.0) {
+            (TargetOs::Windows, "vulkan" | "nvdec") => Some("vulkan"),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Hwdec {
@@ -96,6 +111,16 @@ mod tests {
     #[test]
     fn default_is_automatic_hardware_detection() {
         assert_eq!(Hwdec::default().as_str(), "auto");
+    }
+
+    #[test]
+    fn only_windows_vulkan_and_nvdec_pin_the_gpu_api() {
+        for option in hwdec_options() {
+            let hwdec: Hwdec = option.parse().unwrap();
+            let expected =
+                (cfg!(windows) && matches!(*option, "vulkan" | "nvdec")).then_some("vulkan");
+            assert_eq!(hwdec.gpu_api(), expected, "{option}");
+        }
     }
 
     #[test]

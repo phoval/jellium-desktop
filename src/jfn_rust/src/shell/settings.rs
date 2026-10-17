@@ -311,8 +311,16 @@ impl Settings {
     pub fn update(&mut self, message: Message) -> Outcome {
         match message {
             Message::HardwareDecodingChanged(value) => {
-                if let Ok(hwdec) = value.parse() {
+                if let Ok(hwdec) = value.parse::<jfn_config::Hwdec>() {
                     jfn_config::set_hwdec(hwdec);
+                    let outcome =
+                        jfn_mpv::api::jfn_mpv_apply_hwdec(hwdec.as_str(), hwdec.gpu_api());
+                    tracing::info!(
+                        target: "Settings",
+                        "hwdec={} gpu-api={}: {outcome:?}",
+                        hwdec.as_str(),
+                        hwdec.gpu_api().unwrap_or("auto"),
+                    );
                 }
             }
             Message::AudioPassthroughEdited(value) => {

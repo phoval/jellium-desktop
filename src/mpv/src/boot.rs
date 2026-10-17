@@ -44,6 +44,10 @@ pub struct JfnMpvBoot {
     pub display_backend: u8,
     /// Hardware-decoding mode, e.g. `"auto"`, `"no"`, `"vaapi"`.
     pub hwdec: *const c_char,
+    /// `gpu-api` the hwdec mode's interop needs; null leaves mpv's probe
+    /// order in charge. A `gpu-api` in the user's mpv.conf still wins,
+    /// because mpv.conf is parsed inside `mpv_initialize`.
+    pub gpu_api: *const c_char,
     pub user_agent: *const c_char,
     /// Optional `--audio-spdif` codecs (e.g. `"ac3,dts-hd,eac3,truehd"`).
     pub audio_passthrough: *const c_char,
@@ -70,6 +74,19 @@ pub struct JfnMpvBoot {
 fn handle_slot() -> &'static Mutex<Option<Arc<Handle>>> {
     static SLOT: OnceLock<Mutex<Option<Arc<Handle>>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// The `gpu-api` requested at boot (`None` = mpv's probe). mpv recreates its
+/// window when `gpu-api` changes at runtime, so this is fixed for the
+/// process lifetime.
+fn boot_gpu_api_slot() -> &'static Mutex<Option<String>> {
+    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// The `gpu-api` requested at boot, `None` when mpv's probe was left in charge.
+pub fn boot_gpu_api() -> Option<String> {
+    boot_gpu_api_slot().lock().clone()
 }
 
 unsafe fn cstr_opt(p: *const c_char) -> Option<String> {
@@ -183,6 +200,11 @@ fn apply_boot_options(handle: &Handle, boot: &JfnMpvBoot) -> crate::error::Resul
     if let Some(hwdec) = unsafe { cstr_opt(boot.hwdec) } {
         set("hwdec", &hwdec)?;
     }
+    let gpu_api = unsafe { cstr_opt(boot.gpu_api) };
+    if let Some(api) = gpu_api.as_deref() {
+        set("gpu-api", api)?;
+    }
+    *boot_gpu_api_slot().lock() = gpu_api;
     if let Some(geom) = unsafe { cstr_opt(boot.geometry) } {
         set("geometry", &geom)?;
     }

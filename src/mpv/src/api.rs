@@ -135,6 +135,38 @@ pub unsafe fn jfn_mpv_set_property_string_async(name: *const c_char, value: *con
     }
 }
 
+/// What [`jfn_mpv_apply_hwdec`] did with a new hardware-decode mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwdecApply {
+    /// Written to the live player; mpv reinitializes the decoder in place.
+    Applied,
+    /// The mode needs a different `gpu-api` than the one mpv booted with.
+    /// It takes effect on the next launch.
+    RestartRequired,
+    /// No live player; the mode takes effect on the next launch.
+    NoPlayer,
+}
+
+/// Apply a hardware-decode mode to the live player.
+///
+/// `hwdec` reinitializes only the decoder (`UPDATE_HWDEC`), but `gpu-api`
+/// is `UPDATE_VO`: changing it tears down and recreates mpv's window, which
+/// the platform backends hold by handle. So the write happens only when the
+/// mode's required `gpu-api` matches what mpv booted with.
+pub fn jfn_mpv_apply_hwdec(hwdec: &str, gpu_api: Option<&str>) -> HwdecApply {
+    if raw().is_null() {
+        return HwdecApply::NoPlayer;
+    }
+    if crate::boot::boot_gpu_api().as_deref() != gpu_api {
+        return HwdecApply::RestartRequired;
+    }
+    let Ok(value) = CString::new(hwdec) else {
+        return HwdecApply::NoPlayer;
+    };
+    unsafe { jfn_mpv_set_property_string_async(c"hwdec".as_ptr(), value.as_ptr()) };
+    HwdecApply::Applied
+}
+
 /// Sync int property read. Writes the value into `*out` and returns
 /// libmpv's error code (0 on success, negative on failure). NULL `out`
 /// or missing handle returns `MPV_ERROR_INVALID_PARAMETER` (-4).

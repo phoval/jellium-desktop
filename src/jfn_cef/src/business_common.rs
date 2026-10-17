@@ -48,8 +48,20 @@ pub(crate) fn apply_setting_value(_section: &str, key: &str, value: Option<&str>
         return;
     };
     match key {
-        "hwdec" => match value.parse() {
-            Ok(hwdec) => jfn_config::set_hwdec(hwdec),
+        "hwdec" => match value.parse::<jfn_config::Hwdec>() {
+            Ok(hwdec) => {
+                jfn_config::set_hwdec(hwdec);
+                let outcome = jfn_mpv::api::jfn_mpv_apply_hwdec(hwdec.as_str(), hwdec.gpu_api());
+                jfn_logging::log(
+                    jfn_logging::Category::Cef,
+                    jfn_logging::Level::Info,
+                    &format!(
+                        "Setting {_section}.{key}={} gpu-api={}: {outcome:?}",
+                        hwdec.as_str(),
+                        hwdec.gpu_api().unwrap_or("auto"),
+                    ),
+                );
+            }
             Err(e) => jfn_logging::log(
                 jfn_logging::Category::Cef,
                 jfn_logging::Level::Warn,

@@ -141,6 +141,7 @@ pacman -S --needed --noconfirm \
     $PkgPrefix-meson \
     $PkgPrefix-pkgconf \
     $PkgPrefix-ffmpeg \
+    $PkgPrefix-ffnvcodec-headers \
     $PkgPrefix-libplacebo \
     $PkgPrefix-libass \
     $PkgPrefix-vulkan-headers \

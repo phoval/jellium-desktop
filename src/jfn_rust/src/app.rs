@@ -246,6 +246,7 @@ struct MpvInitOptions<'a> {
 fn init_mpv_handle(opts: MpvInitOptions<'_>) -> *mut jfn_mpv::sys::mpv_handle {
     let geometry_c = opts.boot_geometry.map(cs);
     let hwdec_c = cs(opts.hwdec.as_str());
+    let gpu_api_c = opts.hwdec.gpu_api().map(cs);
     let user_agent_c = cs(&format!("JelliumDesktop/{}", APP_VERSION_FULL));
     let passthrough_c = cs(opts.audio_passthrough);
     let channels_c = cs(opts.audio_channels);
@@ -253,6 +254,7 @@ fn init_mpv_handle(opts: MpvInitOptions<'_>) -> *mut jfn_mpv::sys::mpv_handle {
     let boot = jfn_mpv::boot::JfnMpvBoot {
         display_backend: opts.backend_byte,
         hwdec: hwdec_c.as_ptr(),
+        gpu_api: gpu_api_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         user_agent: user_agent_c.as_ptr(),
         audio_passthrough: if opts.audio_passthrough.is_empty() {
             ptr::null()
@@ -1031,9 +1033,10 @@ fn run_app(
     let mut resources = resources.with_mpv(mpv);
     tracing::info!(
         target: "Main",
-        "[FLOW] mpv handle initialized in {} ms ([mpv-video-decode] hwdec={}; mpv decode is independent of [cef-angle] and [overlay-d3d12])",
+        "[FLOW] mpv handle initialized in {} ms ([mpv-video-decode] hwdec={} gpu-api={}; mpv decode is independent of [cef-angle] and [overlay-d3d12])",
         mpv_started.elapsed().as_millis(),
         opts.hwdec.as_str(),
+        opts.hwdec.gpu_api().unwrap_or("auto"),
     );
 
     if !jfn_playback::ingest_driver::jfn_playback_observe_mpv_properties(backend_byte) {

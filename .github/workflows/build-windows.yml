@@ -47,6 +47,7 @@ jobs:
             ${{ matrix.pkg_prefix }}-meson
             ${{ matrix.pkg_prefix }}-pkgconf
             ${{ matrix.pkg_prefix }}-ffmpeg
+            ${{ matrix.pkg_prefix }}-ffnvcodec-headers
             ${{ matrix.pkg_prefix }}-libplacebo
             ${{ matrix.pkg_prefix }}-libass
             ${{ matrix.pkg_prefix }}-vulkan-headers
