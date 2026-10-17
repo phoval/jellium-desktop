@@ -3,9 +3,8 @@
 use jfn_gpu_paint::Surfaces;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    DCompositionCreateDevice3, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
 /// The DComp device, the HWND composition target, and the root visual every
 /// surface parents into.
@@ -20,7 +19,10 @@ pub(crate) struct Devices {
 impl Devices {
     pub(crate) fn create(hwnd: HWND) -> windows_core::Result<Devices> {
         unsafe {
-            let device: IDCompositionDevice = DCompositionCreateDevice(None::<&IDXGIDevice>)?;
+            // The legacy factory creates visuals without IDCompositionVisual3,
+            // so Layer::set_visible cannot hide a dismissed settings overlay.
+            let device: IDCompositionDevice =
+                DCompositionCreateDevice3(None::<&windows_core::IUnknown>)?;
             let target = device.CreateTargetForHwnd(hwnd, false)?;
             let root = device.CreateVisual()?;
             target.SetRoot(&root)?;
@@ -68,4 +70,55 @@ impl Devices {
 /// so no frame ever has to name it.
 pub(crate) fn gpu() -> Option<&'static Surfaces> {
     Surfaces::init(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::DirectComposition::IDCompositionVisual3;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow};
+    use windows::core::{Interface, w};
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn created_visuals_support_overlay_visibility() -> windows_core::Result<()> {
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!(""),
+                Default::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?);
+        let devices = Devices::create(window.0)?;
+        let visual = devices.new_visual()?;
+        let visible: IDCompositionVisual3 = visual.cast()?;
+        unsafe {
+            devices
+                .root()
+                .AddVisual(&visual, false, None::<&IDCompositionVisual>)?;
+            visible.SetVisible(false)?;
+            devices.device.Commit()?;
+            devices.device.WaitForCommitCompletion()?;
+            visible.SetVisible(true)?;
+            devices.device.Commit()?;
+            devices.device.WaitForCommitCompletion()?;
+        }
+        Ok(())
+    }
 }
