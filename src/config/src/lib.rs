@@ -759,7 +759,9 @@ mod tests {
     fn every_key_writes_in_schema_order() {
         let data = SettingsData {
             server_url: "http://host".into(),
-            hwdec: "auto".parse().expect("auto is offered everywhere"),
+            hwdec: "no"
+                .parse()
+                .expect("software decoding is offered everywhere"),
             audio_passthrough: "eac3".into(),
             audio_channels: "stereo".into(),
             log_level: "debug".into(),
@@ -814,6 +816,7 @@ mod tests {
     fn absent_keys_leave_defaults() {
         let data = loaded(r#"{"serverUrl":"http://host"}"#);
         assert_eq!(data.server_url, "http://host");
+        assert_eq!(data.hwdec.as_str(), "auto");
         assert!(data.transparent_titlebar);
         assert!(data.hide_scrollbar);
         assert_eq!(data.window.x, -1);
