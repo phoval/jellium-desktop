@@ -25,7 +25,12 @@ sudo xattr -cr /Applications/Jellium\ Desktop.app
 ### Windows
 
 - [x64 ZIP (this fork)](https://nightly.link/phoval/jellium-desktop/workflows/build-windows/main/windows-x64.zip)
+- [x64 MSI installer (this fork)](https://nightly.link/phoval/jellium-desktop/workflows/build-windows/main/windows-x64-msi.zip)
 - [ARM64 (upstream)](https://nightly.link/andrewrabert/jellium-desktop/workflows/build-windows/main/windows-arm64.zip)
+
+The MSI installs to Program Files and adds Start Menu and desktop shortcuts. It
+can be removed through Windows Settings. To omit the desktop shortcut during a
+silent installation, pass `DESKTOPSHORTCUT=0` to `msiexec /i <installer.msi> /qn`.
 
 ## Development
 
@@ -55,6 +60,12 @@ mise x -- just fmt
 mise x -- just lint
 ```
 
+Build the Windows installer with `mise x -- just msi -Validate`. This requires a
+.NET SDK and installs the pinned WiX 5 tool under `build/installer/tools` on first
+use. The MSI is written to `dist/`. Pass `-Scope perUser` to install under
+`%LOCALAPPDATA%\Programs` without elevation. The package is unsigned unless
+`-SignThumbprint <certificate-thumbprint>` is supplied.
+
 ### Recipes
 
 ```
@@ -66,6 +77,7 @@ Available recipes:
     appimage ...    # [linux] build AppImage
     flatpak ...     # [linux] build Flatpak bundle
     dmg             # [macos] build Apple Disk Image (.dmg)
+    msi *args       # [windows] build Windows Installer (.msi)
 
     [maintenance]
     outdated      # List outdated dependencies

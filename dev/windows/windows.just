@@ -26,3 +26,9 @@ run *args: build
 [windows]
 run-mpv *args: build
     $env:PATH = "$PWD/third_party/mpv-install/lib;$env:PATH"; & 'third_party/mpv/build/mpv.exe' {{args}}
+
+# Build Windows Installer package (.msi) into dist/
+[group('package')]
+[windows]
+msi *args: build
+    & 'dev/windows/installer/build_msi.ps1' {{args}}
