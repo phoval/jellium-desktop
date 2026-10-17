@@ -25,4 +25,4 @@ run *args: build
 [group('run')]
 [windows]
 run-mpv *args: build
-    & 'build/mpv-build/mpv.exe' {{args}}
+    $env:PATH = "$PWD/third_party/mpv-install/lib;$env:PATH"; & 'third_party/mpv/build/mpv.exe' {{args}}

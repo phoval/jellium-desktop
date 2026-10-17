@@ -64,6 +64,7 @@ foreach ($Prereq in $Prerequisites) {
     if (-not (Find-Command $Prereq.Command)) {
         Write-Host "$($Prereq.Name) not found, installing via winget..." -ForegroundColor Yellow
         & winget install --source winget --accept-package-agreements --accept-source-agreements $Prereq.WingetId
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install $($Prereq.Name) (exit $LASTEXITCODE)" }
         # Refresh PATH after install
         Update-ProcessPath
         if (-not (Find-Command $Prereq.Command)) {
@@ -109,16 +110,24 @@ if ($HasMsvcTools) {
 Write-Host ""
 Write-Host "=== Git Submodules ===" -ForegroundColor Cyan
 Push-Location $RepoRoot
-& git submodule update --init --recursive
-Pop-Location
+try {
+    & git submodule update --init --recursive
+    if ($LASTEXITCODE -ne 0) { throw "Failed to initialize git submodules (exit $LASTEXITCODE)" }
+} finally {
+    Pop-Location
+}
 
 # Download CEF
 if (-not $SkipCef) {
     Write-Host ""
     Write-Host "=== CEF (Chromium Embedded Framework) ===" -ForegroundColor Cyan
     Push-Location $RepoRoot
-    & cargo xtask fetch-cef
-    Pop-Location
+    try {
+        & cargo xtask fetch-cef
+        if ($LASTEXITCODE -ne 0) { throw "Failed to download CEF (exit $LASTEXITCODE)" }
+    } finally {
+        Pop-Location
+    }
 }
 
 # Build libmpv from source
@@ -128,6 +137,7 @@ if (-not $SkipMpv) {
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         Write-Host "PowerShell 7 not found, installing via winget..." -ForegroundColor Yellow
         winget install --source winget --accept-package-agreements --accept-source-agreements Microsoft.PowerShell
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install PowerShell 7 (exit $LASTEXITCODE)" }
         Update-ProcessPath
     }
     pwsh -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build_mpv_source.ps1")

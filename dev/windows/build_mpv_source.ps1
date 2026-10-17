@@ -28,18 +28,51 @@ if ($Arch -eq "arm64") {
     $LibMachine = "X64"
 }
 
-# Check if already built
+# Verify the source before trusting an existing install.
+if (-not (Test-Path (Join-Path $MpvSourceDir "meson.build"))) {
+    throw "mpv submodule not found. Run: git submodule update --init --recursive"
+}
+$SourceRevision = & git -C $MpvSourceDir rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw "Failed to read mpv source revision" }
+$SourceChanges = & git -C $MpvSourceDir status --porcelain --untracked-files=normal
+if ($LASTEXITCODE -ne 0) { throw "Failed to check mpv source changes" }
+$BuildStamp = Join-Path $OutputDir "build-stamp.json"
+$BuildIdentity = [ordered]@{
+    revision = $SourceRevision
+    arch = $Arch
+    msys = [System.IO.Path]::GetFullPath($MsysPath)
+    script = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+}
+$CachedIdentity = $null
+if (Test-Path $BuildStamp) {
+    try { $CachedIdentity = Get-Content -LiteralPath $BuildStamp -Raw | ConvertFrom-Json }
+    catch { Write-Host "Ignoring invalid mpv build stamp" -ForegroundColor Yellow }
+}
+
+# Stamp only complete builds, and never reuse an install for modified sources.
 $OutputLib = Join-Path $OutputDir "lib\mpv.lib"
-if ((Test-Path $OutputLib) -and -not $Force) {
+$RequiredFiles = @(
+    $OutputLib
+    (Join-Path $OutputDir "lib\avcodec.lib")
+    (Join-Path $OutputDir "lib\libmpv-2.dll")
+    (Join-Path $OutputDir "include\mpv\client.h")
+    (Join-Path $OutputDir "include\libavcodec\avcodec.h")
+    (Join-Path $MpvSourceDir "build\mpv.exe")
+)
+$InstallComplete = @($RequiredFiles | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -eq 0
+$IdentityMatches = $CachedIdentity -and @(
+    $BuildIdentity.Keys | Where-Object { $CachedIdentity.$_ -ne $BuildIdentity[$_] }
+).Count -eq 0
+if ($InstallComplete -and $IdentityMatches -and -not $SourceChanges -and -not $Force) {
     Write-Host "mpv already built at $OutputDir" -ForegroundColor Green
     Write-Host "Use -Force to rebuild"
     exit 0
 }
 
-# Verify mpv submodule exists
-if (-not (Test-Path (Join-Path $MpvSourceDir "meson.build"))) {
-    Write-Host "mpv submodule not found. Run: git submodule update --init --recursive" -ForegroundColor Red
-    exit 1
+# Meson cannot reuse a build directory configured for a different toolchain.
+if (-not $CachedIdentity -or $CachedIdentity.arch -ne $Arch -or
+    $CachedIdentity.msys -ne $BuildIdentity.msys -or $CachedIdentity.script -ne $BuildIdentity.script) {
+    $Force = $true
 }
 
 # Check for MSYS2, install if missing
@@ -63,6 +96,7 @@ if (-not (Test-Path $MsysBash)) {
     $env:MSYSTEM = "MSYS"
     $env:CHERE_INVOKING = "1"
     & $MsysBash -l -c "pacman-key --init && pacman -Syu --noconfirm"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to initialize MSYS2" }
 
     if (-not (Test-Path $MsysBash)) {
         Write-Host "MSYS2 installation failed" -ForegroundColor Red
@@ -121,7 +155,9 @@ pacman -S --needed --noconfirm \
 $MesonBuildDir = Join-Path $MpvSourceDir "build"
 if ($Force -and (Test-Path $MesonBuildDir)) {
     Write-Host "Cleaning previous build..." -ForegroundColor Yellow
-    Remove-Item -Recurse -Force $MesonBuildDir
+    $ResolvedBuildDir = (Resolve-Path -LiteralPath $MesonBuildDir).Path
+    if ($ResolvedBuildDir -ne (Join-Path $MpvSourceDir "build")) { throw "Unexpected mpv build directory: $ResolvedBuildDir" }
+    Remove-Item -LiteralPath $ResolvedBuildDir -Recurse -Force
 }
 
 # Configure with meson
@@ -162,7 +198,9 @@ Write-Host "=== Setting up output directory ===" -ForegroundColor Cyan
 
 # Setup output directory (matches EXTERNAL_MPV_DIR layout)
 if (Test-Path $OutputDir) {
-    Remove-Item -Recurse -Force $OutputDir
+    $ResolvedOutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
+    if ($ResolvedOutputDir -ne (Join-Path $RepoRoot "third_party\mpv-install")) { throw "Unexpected mpv install directory: $ResolvedOutputDir" }
+    Remove-Item -LiteralPath $ResolvedOutputDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 $LibDir = Join-Path $OutputDir "lib"
@@ -345,6 +383,10 @@ if (-not (Test-Path (Join-Path $LibDir "avcodec.lib"))) {
     exit 1
 }
 Write-Host "Generated avcodec.lib" -ForegroundColor Green
+
+if (-not $SourceChanges) {
+    $BuildIdentity | ConvertTo-Json | Set-Content -LiteralPath $BuildStamp
+}
 
 Write-Host ""
 Write-Host "=== Build complete ===" -ForegroundColor Green
