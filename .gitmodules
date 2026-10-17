@@ -1,4 +1,4 @@
 [submodule "third_party/mpv"]
 	path = third_party/mpv
-	url = https://github.com/andrewrabert/mpv
+	url = https://github.com/phoval/mpv.git
 	branch = jellium-desktop
