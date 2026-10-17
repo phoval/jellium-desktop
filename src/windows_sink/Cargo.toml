@@ -25,5 +25,8 @@ windows = { workspace = true, features = [
 ] }
 windows-core.workspace = true
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+
 [lints]
 workspace = true

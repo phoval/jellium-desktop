@@ -16,7 +16,9 @@ use std::time::Instant;
 use jfn_playback::sink_core::{
     self, MediaCommand, Phase, PositionThrottle, QueuedSink, map_kind_to_phase,
 };
-use jfn_playback::{MediaMetadata, MediaType as PbMediaType, PlaybackEvent, PlaybackEventKind};
+use jfn_playback::{
+    MediaMetadata, MediaType as PbMediaType, PlaybackEvent, PlaybackEventKind, PlaybackSnapshot,
+};
 use windows::Foundation::TimeSpan;
 use windows::Media::{
     MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls,
@@ -45,7 +47,7 @@ pub fn jfn_windows_sink_stop() {
 struct WinState {
     metadata: MediaMetadata,
     phase: Option<Phase>,
-    position_us: i64,
+    snapshot: PlaybackSnapshot,
     throttle: PositionThrottle,
 }
 
@@ -193,6 +195,9 @@ fn on_button_pressed(button: SystemMediaTransportControlsButton) {
 }
 
 fn deliver(state: &mut WinState, smtc: &mut Option<Smtc>, ev: &PlaybackEvent) {
+    // Every event carries the coordinator's observed mpv state. In particular,
+    // pause/rate/duration changes must not reuse the last throttled position.
+    state.snapshot.clone_from(&ev.snapshot);
     match ev.kind {
         PlaybackEventKind::MetadataChanged => {
             if !ev.metadata.id.is_empty() && ev.metadata.id == state.metadata.id {
@@ -245,7 +250,7 @@ fn deliver(state: &mut WinState, smtc: &mut Option<Smtc>, ev: &PlaybackEvent) {
                 }
                 Phase::Stopped => {
                     state.metadata = MediaMetadata::default();
-                    state.position_us = 0;
+                    state.snapshot = PlaybackSnapshot::default();
                     s.cached_thumbnail = None;
                     let _ = s.updater.ClearAll();
                     let _ = s.updater.Update();
@@ -256,7 +261,6 @@ fn deliver(state: &mut WinState, smtc: &mut Option<Smtc>, ev: &PlaybackEvent) {
             state.throttle.force_next();
         }
         PlaybackEventKind::PositionChanged => {
-            state.position_us = ev.snapshot.position_us;
             if state.throttle.due(Instant::now(), false)
                 && let Some(s) = smtc.as_mut()
             {
@@ -264,10 +268,14 @@ fn deliver(state: &mut WinState, smtc: &mut Option<Smtc>, ev: &PlaybackEvent) {
             }
         }
         PlaybackEventKind::Seeked => {
-            state.position_us = ev.snapshot.position_us;
             if state.throttle.due(Instant::now(), true)
                 && let Some(s) = smtc.as_mut()
             {
+                update_timeline(state, s);
+            }
+        }
+        PlaybackEventKind::RateChanged | PlaybackEventKind::DurationChanged => {
+            if let Some(s) = smtc.as_ref() {
                 update_timeline(state, s);
             }
         }
@@ -307,18 +315,30 @@ fn update_display_properties(state: &mut WinState, s: &mut Smtc) {
 }
 
 fn update_timeline(state: &WinState, s: &Smtc) {
-    if state.metadata.duration_us <= 0 {
+    let _ = s.smtc.SetPlaybackRate(state.snapshot.rate);
+    let Ok(tl) = timeline_properties(&state.snapshot) else {
         return;
-    }
-    let tl = SystemMediaTransportControlsTimelineProperties::new();
-    let Ok(tl) = tl else { return };
-    let to_ticks = |us: i64| TimeSpan { Duration: us * 10 };
-    let _ = tl.SetStartTime(TimeSpan { Duration: 0 });
-    let _ = tl.SetEndTime(to_ticks(state.metadata.duration_us));
-    let _ = tl.SetPosition(to_ticks(state.position_us));
-    let _ = tl.SetMinSeekTime(TimeSpan { Duration: 0 });
-    let _ = tl.SetMaxSeekTime(to_ticks(state.metadata.duration_us));
+    };
     let _ = s.smtc.UpdateTimelineProperties(&tl);
+}
+
+fn timeline_properties(
+    snapshot: &PlaybackSnapshot,
+) -> windows_core::Result<SystemMediaTransportControlsTimelineProperties> {
+    // Windows uses 100 ns ticks. Unknown duration clears the previous range;
+    // clamp position so SMTC never receives a seek range with position
+    // outside its endpoints while a stream's duration changes.
+    let duration = snapshot.duration_us.max(0);
+    let to_ticks = |us: i64| TimeSpan {
+        Duration: us.saturating_mul(10),
+    };
+    let tl = SystemMediaTransportControlsTimelineProperties::new()?;
+    tl.SetStartTime(TimeSpan { Duration: 0 })?;
+    tl.SetEndTime(to_ticks(duration))?;
+    tl.SetPosition(to_ticks(snapshot.position_us.clamp(0, duration)))?;
+    tl.SetMinSeekTime(TimeSpan { Duration: 0 })?;
+    tl.SetMaxSeekTime(to_ticks(duration))?;
+    Ok(tl)
 }
 
 fn decode_base64(s: &str) -> Option<Vec<u8>> {
@@ -355,4 +375,167 @@ fn make_thumbnail_stream(bytes: &[u8]) -> Option<RandomAccessStreamReference> {
     let _ = writer.DetachStream();
     stream.Seek(0).ok()?;
     RandomAccessStreamReference::CreateFromStream(&stream).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow};
+    use windows::core::w;
+
+    struct Apartment;
+
+    impl Apartment {
+        fn new() -> windows_core::Result<Self> {
+            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }?;
+            Ok(Self)
+        }
+    }
+
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            unsafe { RoUninitialize() };
+        }
+    }
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    fn event(
+        kind: PlaybackEventKind,
+        rate: f64,
+        duration_us: i64,
+        position_us: i64,
+    ) -> PlaybackEvent {
+        PlaybackEvent {
+            kind,
+            flag: false,
+            error_message: String::new(),
+            snapshot: PlaybackSnapshot {
+                rate,
+                duration_us,
+                position_us,
+                ..Default::default()
+            },
+            metadata: MediaMetadata::default(),
+            artwork_uri: String::new(),
+            can_go_next: false,
+            can_go_prev: false,
+        }
+    }
+
+    #[test]
+    fn rate_and_duration_changes_refresh_smtc_without_waiting_for_position()
+    -> windows_core::Result<()> {
+        let _apartment = Apartment::new()?;
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!(""),
+                Default::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?);
+        let interop: ISystemMediaTransportControlsInterop = unsafe {
+            RoGetActivationFactory(&HSTRING::from("Windows.Media.SystemMediaTransportControls"))
+        }?;
+        let controls: SystemMediaTransportControls = unsafe { interop.GetForWindow(window.0) }?;
+        let mut smtc = Some(Smtc {
+            updater: controls.DisplayUpdater()?,
+            smtc: controls.clone(),
+            button_token: 0,
+            seek_token: 0,
+            cached_thumbnail: None,
+        });
+        let mut state = WinState::default();
+        assert!(state.throttle.due(Instant::now(), false));
+        deliver(
+            &mut state,
+            &mut smtc,
+            &event(PlaybackEventKind::RateChanged, 1.5, 60_000_000, 12_000_000),
+        );
+        assert_eq!(controls.PlaybackRate()?, 1.5);
+        assert_eq!(state.snapshot.position_us, 12_000_000);
+        // A duration update must publish immediately too, even with no new
+        // PositionChanged and an already-used throttle allowance.
+        deliver(
+            &mut state,
+            &mut smtc,
+            &event(
+                PlaybackEventKind::DurationChanged,
+                2.0,
+                90_000_000,
+                15_000_000,
+            ),
+        );
+        assert_eq!(controls.PlaybackRate()?, 2.0);
+        let timeline = timeline_properties(&state.snapshot)?;
+        assert_eq!(timeline.EndTime()?.Duration, 900_000_000);
+        assert_eq!(timeline.MaxSeekTime()?.Duration, 900_000_000);
+        assert_eq!(timeline.Position()?.Duration, 150_000_000);
+        Ok(())
+    }
+
+    #[test]
+    fn paused_timeline_uses_observed_duration_and_current_position() -> windows_core::Result<()> {
+        let _apartment = Apartment::new()?;
+        let mut state = WinState::default();
+        let mut metadata = event(
+            PlaybackEventKind::MetadataChanged,
+            1.5,
+            60_000_000,
+            5_000_000,
+        );
+        metadata.metadata.duration_us = 120_000_000;
+        deliver(&mut state, &mut None, &metadata);
+        deliver(
+            &mut state,
+            &mut None,
+            &event(PlaybackEventKind::Paused, 1.5, 60_000_000, 12_000_000),
+        );
+        let timeline = timeline_properties(&state.snapshot)?;
+        assert_eq!(timeline.EndTime()?.Duration, 600_000_000);
+        assert_eq!(timeline.Position()?.Duration, 120_000_000);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_duration_and_out_of_range_positions_produce_valid_timelines()
+    -> windows_core::Result<()> {
+        let _apartment = Apartment::new()?;
+        for (duration_us, position_us, expected_end, expected_position) in [
+            (0, 12_000_000, 0, 0),
+            (-1, 12_000_000, 0, 0),
+            (60_000_000, -1, 600_000_000, 0),
+            (60_000_000, 90_000_000, 600_000_000, 600_000_000),
+            (i64::MAX, i64::MAX, i64::MAX, i64::MAX),
+        ] {
+            let snapshot = PlaybackSnapshot {
+                duration_us,
+                position_us,
+                ..Default::default()
+            };
+            let timeline = timeline_properties(&snapshot)?;
+            assert_eq!(timeline.StartTime()?.Duration, 0);
+            assert_eq!(timeline.MinSeekTime()?.Duration, 0);
+            assert_eq!(timeline.EndTime()?.Duration, expected_end);
+            assert_eq!(timeline.MaxSeekTime()?.Duration, expected_end);
+            assert_eq!(timeline.Position()?.Duration, expected_position);
+        }
+        Ok(())
+    }
 }
