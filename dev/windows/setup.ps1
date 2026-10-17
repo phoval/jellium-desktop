@@ -1,5 +1,5 @@
 # Setup Windows development environment for jellium-desktop
-# Prerequisites: Visual Studio 2022, Python 3, 7-Zip, CMake (needed by
+# Prerequisites: MSVC (Visual Studio or msvcup), Python 3, 7-Zip, CMake (needed by
 # cef-dll-sys to build libcef_dll_wrapper), Ninja, meson, Rust.
 
 param(
@@ -10,8 +10,17 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Get-Item $PSScriptRoot).Parent.Parent.FullName
 
-# Refresh PATH to pick up recently installed tools (e.g. via winget)
-$env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+# Preserve shell toolchains (e.g. mise/msvcup) while picking up new installs.
+function Update-ProcessPath {
+    $PathSources = @(
+        $env:Path
+        [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+        [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    )
+    $SeenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $env:Path = (($PathSources -split ';') | Where-Object { $_ -and $SeenPaths.Add($_) }) -join ';'
+}
+Update-ProcessPath
 
 Write-Host "=== jellium-desktop Windows Setup ===" -ForegroundColor Cyan
 Write-Host "Repository: $RepoRoot"
@@ -56,7 +65,7 @@ foreach ($Prereq in $Prerequisites) {
         Write-Host "$($Prereq.Name) not found, installing via winget..." -ForegroundColor Yellow
         & winget install --source winget --accept-package-agreements --accept-source-agreements $Prereq.WingetId
         # Refresh PATH after install
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        Update-ProcessPath
         if (-not (Find-Command $Prereq.Command)) {
             Write-Host "$($Prereq.Name) installed but not found in PATH. Restart your shell and re-run." -ForegroundColor Red
             exit 1
@@ -65,8 +74,9 @@ foreach ($Prereq in $Prerequisites) {
     }
 }
 
-# Check for Visual Studio with C++ workload
-Write-Host "=== Visual Studio ===" -ForegroundColor Cyan
+# Accept MSVC tools on PATH, including msvcup's autoenv wrappers.
+Write-Host "=== MSVC ===" -ForegroundColor Cyan
+$HasMsvcTools = (Test-Command cl.exe) -and (Test-Command link.exe) -and (Test-Command lib.exe)
 $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
 # Check if VS with VC tools is already installed
@@ -75,7 +85,7 @@ if (Test-Path $VsWhere) {
     $VsPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 }
 
-if (-not $VsPath) {
+if (-not $HasMsvcTools -and -not $VsPath) {
     Write-Host "Visual Studio C++ workload not found, installing Build Tools via winget..." -ForegroundColor Yellow
     & winget install --source winget --accept-package-agreements --accept-source-agreements --force Microsoft.VisualStudio.2022.BuildTools --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
@@ -89,7 +99,11 @@ if (-not $VsPath) {
         exit 1
     }
 }
-Write-Host "Visual Studio: $VsPath" -ForegroundColor Green
+if ($HasMsvcTools) {
+    Write-Host "MSVC on PATH: $((Get-Command cl.exe).Source)" -ForegroundColor Green
+} else {
+    Write-Host "Visual Studio: $VsPath" -ForegroundColor Green
+}
 
 # Initialize git submodules
 Write-Host ""
@@ -114,7 +128,7 @@ if (-not $SkipMpv) {
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         Write-Host "PowerShell 7 not found, installing via winget..." -ForegroundColor Yellow
         winget install --source winget --accept-package-agreements --accept-source-agreements Microsoft.PowerShell
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        Update-ProcessPath
     }
     pwsh -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "build_mpv_source.ps1")
     if ($LASTEXITCODE -ne 0) { throw "libmpv build failed" }
@@ -124,7 +138,7 @@ Write-Host ""
 Write-Host "=== Setup Complete ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "To build:"
-Write-Host "  1. Open 'x64 Native Tools Command Prompt for VS 2022'"
+Write-Host "  1. Use a shell with msvcup autoenv on PATH or 'x64 Native Tools Command Prompt for VS 2022'"
 Write-Host "  2. Navigate to repository: cd $RepoRoot"
 Write-Host "  3. Run: cargo xtask build"
 Write-Host ""

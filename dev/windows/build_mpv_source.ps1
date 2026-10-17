@@ -197,7 +197,7 @@ Copy-Item $BuiltDll $LibDir
 Write-Host "Generating MSVC import library..."
 
 $HasMsvc = $false
-if ($env:VSINSTALLDIR -and (Get-Command lib.exe -ErrorAction SilentlyContinue)) {
+if ((Get-Command lib.exe -ErrorAction SilentlyContinue) -and (Get-Command link.exe -ErrorAction SilentlyContinue)) {
     $HasMsvc = $true
 } else {
     $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -221,12 +221,15 @@ if ($env:VSINSTALLDIR -and (Get-Command lib.exe -ErrorAction SilentlyContinue)) 
     }
 }
 
+$MsvcLink = Get-Command link.exe -ErrorAction SilentlyContinue
+$HasMsvc = $HasMsvc -and ($null -ne $MsvcLink)
+
 if ($HasMsvc) {
-    # Use dumpbin + lib.exe (best quality import lib)
+    # link /dump also works with msvcup's autoenv, which has no dumpbin wrapper.
     $DllPath = Join-Path $LibDir "libmpv-2.dll"
     $DefFile = Join-Path $LibDir "libmpv-2.def"
 
-    $DumpOutput = & dumpbin /exports $DllPath
+    $DumpOutput = & $MsvcLink.Source /dump /exports $DllPath
     $Exports = $DumpOutput | Where-Object {
         $_ -match "^\s+\d+\s+[A-F0-9]+\s+[A-F0-9]+\s+(\w+)"
     } | ForEach-Object {
@@ -318,7 +321,7 @@ if (-not $AvcodecDll) {
 $AvcodecBase = [System.IO.Path]::GetFileNameWithoutExtension($AvcodecDll.Name)
 if ($HasMsvc) {
     $DefFile = Join-Path $LibDir "$AvcodecBase.def"
-    $DumpOutput = & dumpbin /exports $AvcodecDll.FullName
+    $DumpOutput = & $MsvcLink.Source /dump /exports $AvcodecDll.FullName
     $Exports = $DumpOutput | ForEach-Object {
         if ($_ -match "^\s+\d+\s+[A-F0-9]+\s+[A-F0-9]+\s+(\w+)") { $matches[1] }
     }

@@ -1,0 +1,10 @@
+[env]
+# Existing msvcup installation; this is the directory containing autoenv/.
+MSVCUP_ROOT = { default = "C:/msvcup/msvc" }
+
+# libclang from MSYS2 is used by Rust bindgen.
+LIBCLANG_PATH = { default = "C:/msys64/{{ arch(x64='clang64', arm64='clangarm64') }}/bin" }
+BINDGEN_EXTRA_CLANG_ARGS = { default = "--target={{ arch(x64='x86_64', arm64='aarch64') }}-pc-windows-msvc" }
+
+# Keep the MSVC wrappers ahead of MSYS2 tools such as link.exe.
+_.path = ["{{ env.MSVCUP_ROOT }}/autoenv/{{ arch() }}", "{{ env.LIBCLANG_PATH }}"]

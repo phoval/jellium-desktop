@@ -4,7 +4,42 @@
 
 $ErrorActionPreference = "Stop"
 
-if (-not $env:VSINSTALLDIR) {
+# msvcup's autoenv wrappers initialize only their own child process. Bindgen
+# loads libclang directly, so import the same INCLUDE/LIB/PATH into this shell.
+$MsvcCl = Get-Command cl.exe -ErrorAction SilentlyContinue
+if ($MsvcCl) {
+    $AutoEnvFile = Join-Path (Split-Path $MsvcCl.Source) "env"
+    if (Test-Path $AutoEnvFile) {
+        $AutoEnvVars = Join-Path (Split-Path $AutoEnvFile) (Get-Content $AutoEnvFile -Raw).Trim()
+        if (-not (Test-Path $AutoEnvVars)) {
+            throw "msvcup environment script not found: $AutoEnvVars"
+        }
+        $TempBat = Join-Path $env:TEMP "jfn_msvcup_$([guid]::NewGuid()).bat"
+        try {
+            Set-Content $TempBat -Value @(
+                ('@call "' + $AutoEnvVars + '"')
+                '@if errorlevel 1 exit /b %errorlevel%'
+                '@set'
+            ) -Encoding ASCII
+            $AutoEnvOutput = & cmd /d /c $TempBat
+            if ($LASTEXITCODE -ne 0) { throw "Failed to load msvcup environment" }
+            $AutoEnvOutput | ForEach-Object {
+                if ($_ -match "^([^=]+)=(.*)$") {
+                    [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+                }
+            }
+        } finally {
+            Remove-Item -LiteralPath $TempBat -ErrorAction SilentlyContinue
+        }
+        Write-Host "Loaded msvcup environment" -ForegroundColor Green
+    }
+}
+
+if (-not $env:VSINSTALLDIR -and -not (
+    (Get-Command cl.exe -ErrorAction SilentlyContinue) -and
+    (Get-Command link.exe -ErrorAction SilentlyContinue) -and
+    (Get-Command lib.exe -ErrorAction SilentlyContinue)
+)) {
     Write-Host "MSVC environment not detected." -ForegroundColor Yellow
     Write-Host "Attempting to load vcvars64.bat..."
 

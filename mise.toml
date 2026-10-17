@@ -1,0 +1,5 @@
+[tools]
+cmake = "latest"
+just = "latest"
+meson = "latest"
+ninja = "latest"
