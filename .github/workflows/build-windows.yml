@@ -50,6 +50,7 @@ jobs:
             ${{ matrix.pkg_prefix }}-ffnvcodec-headers
             ${{ matrix.pkg_prefix }}-libplacebo
             ${{ matrix.pkg_prefix }}-libass
+            ${{ matrix.pkg_prefix }}-luajit
             ${{ matrix.pkg_prefix }}-vulkan-headers
             ${{ matrix.pkg_prefix }}-vulkan-loader
             ${{ matrix.pkg_prefix }}-shaderc

@@ -55,6 +55,7 @@ $RequiredFiles = @(
     $OutputLib
     (Join-Path $OutputDir "lib\avcodec.lib")
     (Join-Path $OutputDir "lib\libmpv-2.dll")
+    (Join-Path $OutputDir "lib\lua51.dll")
     (Join-Path $OutputDir "include\mpv\client.h")
     (Join-Path $OutputDir "include\libavcodec\avcodec.h")
     (Join-Path $MpvSourceDir "build\mpv.exe")
@@ -144,6 +145,7 @@ pacman -S --needed --noconfirm \
     $PkgPrefix-ffnvcodec-headers \
     $PkgPrefix-libplacebo \
     $PkgPrefix-libass \
+    $PkgPrefix-luajit \
     $PkgPrefix-vulkan-headers \
     $PkgPrefix-vulkan-loader \
     $PkgPrefix-shaderc \
@@ -168,7 +170,7 @@ cd '$MsysMpvSource' && \
 meson setup build --default-library=shared \
     -Dlibmpv=true \
     -Dcplayer=true \
-    -Dlua=disabled \
+    -Dlua=luajit \
     -Djavascript=disabled \
     -Dcdda=disabled \
     -Ddvdnav=disabled \
@@ -344,6 +346,11 @@ Set-Content -Path $DepScriptPath -Value $DepScript -NoNewline
 $MsysDepScript = ConvertTo-MsysPath $DepScriptPath
 
 Invoke-Msys2 "bash '$MsysDepScript'" -Description "Copying MSYS2 runtime dependencies"
+
+# LuaJIT must ship alongside libmpv for user scripts to work without MSYS2.
+if (-not (Test-Path (Join-Path $LibDir "lua51.dll"))) {
+    throw "LuaJIT runtime lua51.dll was not collected from MSYS2"
+}
 
 # Count what we copied
 $DllCount = (Get-ChildItem $LibDir -Filter "*.dll").Count
