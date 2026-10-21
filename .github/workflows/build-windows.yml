@@ -33,11 +33,20 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}
+          workspaces: |
+            src -> target
+            src -> ../build/cargo-target
+
       - uses: ./.github/actions/setup-cef
         with:
           platform: ${{ github.workflow }}-${{ matrix.arch }}
 
       - name: Setup MSYS2
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
@@ -56,11 +65,45 @@ jobs:
             ${{ matrix.pkg_prefix }}-shaderc
             ${{ matrix.pkg_prefix }}-spirv-cross
             ${{ matrix.pkg_prefix }}-llvm
+            ${{ matrix.pkg_prefix }}-tools
+
+      - name: Determine mpv cache identity
+        id: mpv-key
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          # The hosted image version covers MSVC and the Windows SDK; pacman
+          # versions cover the compiler, build tools, and transitive native deps.
+          if (-not $env:ImageOS -or -not $env:ImageVersion) {
+            throw "Hosted runner image identity is missing"
+          }
+          $Packages = & (Join-Path $env:MSYS2_ROOT 'usr\bin\pacman.exe') -Q
+          if ($LASTEXITCODE -ne 0) { throw "Failed to read MSYS2 package versions" }
+          $Identity = (@($env:ImageOS, $env:ImageVersion) + @($Packages | Sort-Object)) -join "`n"
+          $Hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes($Identity)))
+          $Revision = & git -C third_party/mpv rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Failed to read mpv revision" }
+          "environment=$Hash" >> $env:GITHUB_OUTPUT
+          "revision=$Revision" >> $env:GITHUB_OUTPUT
+
+      - name: Cache built mpv
+        id: mpv-cache
+        uses: actions/cache@v6
+        with:
+          # Cache the complete install, including headers, import libs, and DLLs.
+          # No restore-keys: native binaries require an exact environment match.
+          path: third_party/mpv-install
+          key: mpv-${{ runner.os }}-${{ matrix.arch }}-${{ steps.mpv-key.outputs.revision }}-${{ hashFiles('dev/windows/build_mpv_source.ps1') }}-${{ steps.mpv-key.outputs.environment }}
 
       - name: Build mpv from source
+        if: steps.mpv-cache.outputs.cache-hit != 'true'
         shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
         run: |
-          dev\windows\build_mpv_source.ps1 -Arch ${{ matrix.arch }} -Force
+          dev\windows\build_mpv_source.ps1 -Arch ${{ matrix.arch }} -MsysPath $env:MSYS2_ROOT
 
       - name: Build and package
         shell: cmd
@@ -70,8 +113,8 @@ jobs:
           # libclang.dll under the msystem prefix's bin/; cmd.exe
           # doesn't pick that up from setup-msys2, so point bindgen
           # at it explicitly.
-          LIBCLANG_PATH: C:\msys64\${{ matrix.msystem }}\bin
-          MSYS_BIN: C:\msys64\${{ matrix.msystem }}\bin
+          LIBCLANG_PATH: ${{ steps.msys2.outputs.msys2-location }}\${{ matrix.msystem }}\bin
+          MSYS_BIN: ${{ steps.msys2.outputs.msys2-location }}\${{ matrix.msystem }}\bin
           # mingw's libclang doesn't auto-pick the MSVC target triple, so
           # MSVC's arch-specific headers (__int64, vcruntime intrinsics,
           # etc.) get parsed against the wrong default target. Pin it.
