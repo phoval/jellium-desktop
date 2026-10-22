@@ -60,8 +60,16 @@ mise x -- just fmt
 mise x -- just lint
 ```
 
-Build the Windows installer with `mise x -- just msi -Validate`. This requires a
-.NET SDK and installs the pinned WiX 5 tool under `build/installer/tools` on first
+Build the Windows installer with
+`mise x -- just msi -BuildNumber <number> -Validate`. The build number is required
+(or may be supplied through `MSI_BUILD_NUMBER`) and must be in `0..65535`. Increase
+it for each new installer within the same major/minor version, including releases
+and development builds. CI supplies `github.run_number`; rerunning a workflow
+reuses that number. A rebuilt MSI with the same version is blocked if that version
+is already installed; the original MSI still supports maintenance.
+
+Building the MSI requires a .NET SDK and installs the pinned WiX 5 tool under
+`build/installer/tools` on first
 use. The MSI is written to `dist/`. Pass `-Scope perUser` to install under
 `%LOCALAPPDATA%\Programs` without elevation. The package is unsigned unless
 `-SignThumbprint <certificate-thumbprint>` is supplied.

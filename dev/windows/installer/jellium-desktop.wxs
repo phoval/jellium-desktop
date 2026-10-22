@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
   Built by dev/windows/installer/build_msi.ps1, which stages the payload and
   passes every path in through -d preprocessor variables. UpgradeCode is this
@@ -9,6 +9,7 @@
 
   <?define ProductName = "Jellium Desktop" ?>
   <?define Manufacturer = "Jellium" ?>
+  <?define UpgradeCode = "A2D06AA8-CC53-4482-ADF1-97FB7FDE33F8" ?>
   <?define HomePage = "https://github.com/phoval/jellium-desktop" ?>
 
   <!-- Scope is fixed at build time, so component keypaths can name a concrete
@@ -22,7 +23,7 @@
   <Package Name="$(var.ProductName)"
            Manufacturer="$(var.Manufacturer)"
            Version="$(var.ProductVersion)"
-           UpgradeCode="A2D06AA8-CC53-4482-ADF1-97FB7FDE33F8"
+           UpgradeCode="$(var.UpgradeCode)"
            Scope="$(var.Scope)"
            Compressed="yes"
            InstallerVersion="500"
@@ -32,11 +33,23 @@
     <SummaryInformation Description="$(var.ProductName) $(var.FullVersion)"
                         Keywords="Jellyfin,Media,Player,Installer" />
 
-    <!-- AllowSameVersionUpgrades keeps re-running the same dev build from
-         stacking duplicate Add/Remove Programs entries. -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes"
-                  Schedule="afterInstallValidate"
-                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first if you want to downgrade." />
+    <!-- Remove the old files first: development executables share FILEVERSION
+         0.0.0.0, so an install over existing files can retain the old binary.
+         Start the transaction first so a failed upgrade restores the old files. -->
+    <MajorUpgrade AllowSameVersionUpgrades="no"
+                  Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <!-- A rebuild gets a new ProductCode even when its build number is reused.
+         Detect equal versions explicitly to prevent parallel registrations. -->
+    <Upgrade Id="$(var.UpgradeCode)">
+      <UpgradeVersion Minimum="$(var.ProductVersion)" IncludeMinimum="yes"
+                      Maximum="$(var.ProductVersion)" IncludeMaximum="yes"
+                      Language="1033" OnlyDetect="yes"
+                      Property="SAME_VERSION_DETECTED" />
+    </Upgrade>
+    <Launch Condition="Installed OR NOT SAME_VERSION_DETECTED"
+            Message="This version of [ProductName] is already installed. Use a higher build number for a rebuilt installer." />
 
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 

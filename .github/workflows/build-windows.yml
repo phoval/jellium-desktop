@@ -26,6 +26,8 @@ jobs:
             pkg_prefix: mingw-w64-clang-x86_64
             triple: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
+    env:
+      MSI_BUILD_NUMBER: ${{ github.run_number }}
 
     steps:
       - name: Checkout
@@ -120,6 +122,7 @@ jobs:
           # etc.) get parsed against the wrong default target. Pin it.
           BINDGEN_EXTRA_CLANG_ARGS: --target=${{ matrix.triple }}
           MATRIX_ARCH: ${{ matrix.arch }}
+          MSI_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSINSTALL=%%i"
           call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" %MATRIX_ARCH% || exit /b 1

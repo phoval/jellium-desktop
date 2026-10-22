@@ -29,7 +29,9 @@ param(
     [string]$SignThumbprint,
     [string]$TimestampUrl = 'http://timestamp.digicert.com',
 
-    [string]$WixVersion = '5.0.2'
+    [string]$WixVersion = '5.0.2',
+
+    [Nullable[int]]$BuildNumber = $null
 )
 
 $ErrorActionPreference = 'Stop'
@@ -302,12 +304,35 @@ try {
 }
 $FullVersion = $FullVersion.Trim()
 
-# ProductVersion must be strictly numeric, so drop any -pre / +sha suffix. The
-# untruncated string still shows up in Add/Remove Programs and the file name.
+# ProductVersion must be strictly numeric: Major.Minor.Build, where:
+#   Major: 0..255
+#   Minor: 0..255
+#   Build: 0..65535
+#
+# Both development and release installers share a mandatory, monotonically
+# increasing build number (MSI_BUILD_NUMBER) to maintain a strict upgrade sequence
+# in Windows Installer.
 if ($FullVersion -match '^(\d+)\.(\d+)\.(\d+)') {
-    $ProductVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+    $Major = [int]$Matches[1]
+    $Minor = [int]$Matches[2]
+
+    if ($PSBoundParameters.ContainsKey('BuildNumber') -and $null -ne $BuildNumber) {
+        $Build = [int]$BuildNumber
+    } elseif ($env:MSI_BUILD_NUMBER) {
+        $Build = [int]$env:MSI_BUILD_NUMBER
+    } else {
+        throw "MSI build number required. Use -BuildNumber or MSI_BUILD_NUMBER."
+    }
+
+    if ($Major -lt 0 -or $Major -gt 255 -or
+        $Minor -lt 0 -or $Minor -gt 255 -or
+        $Build -lt 0 -or $Build -gt 65535) {
+        throw "Invalid MSI version fields"
+    }
+
+    $ProductVersion = "$Major.$Minor.$Build"
 } else {
-    throw "cannot derive an MSI version from '$FullVersion'"
+    throw "Cannot derive MSI version from '$FullVersion'"
 }
 Write-Host "Version: $FullVersion (MSI ProductVersion $ProductVersion)"
 
@@ -345,9 +370,7 @@ if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 Invoke-Sign $MsiPath
 
 if ($Validate) {
-    # ICE61 is the documented side effect of AllowSameVersionUpgrades: the
-    # upgrade range's ceiling equals the product's own version, on purpose.
-    $Suppressed = @('ICE61')
+    $Suppressed = @()
     if ($Scope -eq 'perUser') {
         # ICE38/64/91 all boil down to "this component lives in the user
         # profile", which is exactly what a per-user install is.
